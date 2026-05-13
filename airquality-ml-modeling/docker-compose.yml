@@ -1,0 +1,41 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: airquality_api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BASE_DATA_DIR=/app/data
+      - BASE_OUTPUT_DIR=/app/outputs
+      - CSV_PATH=/app/data/raw/air_quality_core.csv
+      - MODEL_OUTPUT_DIR=/app/outputs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+  retrain:
+    build:
+      context: .
+      dockerfile: Dockerfile.retrain
+    container_name: airquality_retrain
+    volumes:
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    environment:
+      - PYTHONUNBUFFERED=1
+      - BASE_DATA_DIR=/app/data
+      - BASE_OUTPUT_DIR=/app/outputs
+      - CSV_PATH=/app/data/raw/air_quality_core.csv
+      - MODEL_OUTPUT_DIR=/app/outputs
+    profiles:
+      - retrain

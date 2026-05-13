@@ -1,0 +1,102 @@
+@startuml AirQualityMonitoring_UseCaseDiagram
+!theme plain
+skinparam actorStyle awesome
+
+title Air Quality Monitoring System - Use Case Diagram
+
+' === ACTORS ===
+actor "Khách" as ANONYMOUS
+actor "Người dùng" as USER
+actor "Quản lý" as MANAGER
+actor "Quản trị viên" as ADMIN
+actor "Hệ thống" as SYSTEM
+
+' === USE CASES ===
+
+' Khách (Anonymous)
+usecase "UC01: Đăng nhập hệ thống" as UC01_LOGIN
+
+' Người dùng (User)
+usecase "UC02: Xem Dashboard giám sát\nchất lượng không khí" as UC02_DASHBOARD
+usecase "UC04: Xem và quản lý Alerts" as UC04_ALERTS
+usecase "UC07: Xem dự báo ML\nvà Drift Monitoring" as UC07_FORECAST
+
+' Quản lý (Manager)
+usecase "UC08: Tạo mới Sensor" as UC08_CREATE_SENSOR
+usecase "UC09: Cấp quyền truy cập\nSensor cho User" as UC09_GRANT_ACCESS
+usecase "UC10: Khám phá thiết bị\ntừ InfluxDB" as UC10_DISCOVER
+
+' Quản trị viên (Admin)
+usecase "UC06: Cấu hình ngưỡng cảnh báo" as UC06_THRESHOLD
+
+' Hệ thống (System)
+usecase "UC03: RealtimePoller -\nThu thập và phát dữ liệu real-time" as UC03_REALTIME
+usecase "UC05: AlertService -\nDịch vụ tạo alerts tự động" as UC05_ALERT_SERVICE
+
+' === RELATIONSHIPS ===
+
+' Khách -> Login
+ANONYMOUS --> UC01_LOGIN
+
+' User -> Use Cases
+USER --> UC02_DASHBOARD
+USER --> UC04_ALERTS
+USER --> UC07_FORECAST
+
+' Manager -> Use Cases
+MANAGER --> UC08_CREATE_SENSOR
+MANAGER --> UC09_GRANT_ACCESS
+MANAGER --> UC10_DISCOVER
+
+' Admin -> Use Cases
+ADMIN --> UC06_THRESHOLD
+
+' System -> Use Cases
+SYSTEM --> UC03_REALTIME
+SYSTEM --> UC05_ALERT_SERVICE
+
+' === INCLUDES / EXTENDS ===
+
+' Dashboard includes Alerts and Forecast
+UC02_DASHBOARD ..> UC04_ALERTS : <<include>>
+UC02_DASHBOARD ..> UC07_FORECAST : <<include>>
+
+' RealtimePoller includes AlertService
+UC03_REALTIME ..> UC05_ALERT_SERVICE : <<include>>
+
+' Threshold affects AlertService
+UC06_THRESHOLD ..> UC05_ALERT_SERVICE : <<include>>
+
+' Login leads to Dashboard (extend - after successful login)
+UC01_LOGIN ..> UC02_DASHBOARD : <<extend>>
+
+' Discover leads to Create Sensor
+UC10_DISCOVER ..> UC08_CREATE_SENSOR : <<extend>>
+
+' === PACKAGES ===
+package "Nhóm Auth" {
+  UC01_LOGIN
+}
+
+package "Nhóm Dashboard" {
+  UC02_DASHBOARD
+  UC04_ALERTS
+  UC07_FORECAST
+}
+
+package "Nhóm Sensors" {
+  UC08_CREATE_SENSOR
+  UC09_GRANT_ACCESS
+  UC10_DISCOVER
+}
+
+package "Nhóm Settings" {
+  UC06_THRESHOLD
+}
+
+package "Nhóm System" {
+  UC03_REALTIME
+  UC05_ALERT_SERVICE
+}
+
+@enduml

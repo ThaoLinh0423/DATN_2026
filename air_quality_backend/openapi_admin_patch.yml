@@ -1,0 +1,267 @@
+# =============================================================================
+# ADMIN API PATCH — append vào openapi.yml
+#
+# Cách dùng:
+#   1. Mở openapi.yml
+#   2. Tìm dòng `tags:` — thêm tag Admin vào cuối danh sách tags
+#   3. Tìm dòng `# ==================== WEBSOCKET ====================`
+#      — paste phần PATHS bên dưới VÀO TRƯỚC block đó
+#   4. Tìm dòng `    EmailSettingsInput:` (cuối schemas)
+#      — paste phần SCHEMAS vào SAU block EmailSettingsInput
+#   5. Đổi version: 2.2.0 → 2.3.0
+#   6. Đổi dòng `- `admin` — tất cả quyền...` trong description thành:
+#      - `admin` — tất cả quyền + cấu hình hệ thống + quản lý users & phân quyền.
+# =============================================================================
+
+
+# ── BƯỚC 1: Thêm vào cuối danh sách `tags:` ──────────────────────────────────
+#
+#   - name: Admin
+#     description: Quản lý users và phân quyền (admin only).
+
+
+# ── BƯỚC 2: PATHS — paste trước block WebSocket ──────────────────────────────
+
+  # ==================== ADMIN ====================
+
+  /admin/users:
+    get:
+      tags: [Admin]
+      summary: Danh sách tất cả users
+      description: |-
+        Yêu cầu role `admin`.
+
+        Hỗ trợ lọc theo role và cursor-based pagination.
+        Trả về kèm tổng số users (`total`) theo filter hiện tại.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: role
+          in: query
+          description: Lọc theo role. Để trống hoặc `all` để lấy tất cả.
+          schema:
+            type: string
+            enum: [all, admin, manager, user]
+            default: all
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: cursor
+          in: query
+          description: userId của bản ghi cuối cùng trong trang trước (cursor-based pagination).
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Danh sách users.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUserListResponse'
+              example:
+                data:
+                  - userId: a3f2b1c4-e89b-12d3-a456-426614174000
+                    email: admin@example.com
+                    name: Administrator
+                    phone: ""
+                    role: admin
+                    timezone: Asia/Ho_Chi_Minh
+                    createdAt: "2024-01-01T00:00:00Z"
+                    updatedAt: "2024-01-01T00:00:00Z"
+                  - userId: b7c3d2e1-f90c-23e4-b567-537725285111
+                    email: user@example.com
+                    name: Nguyễn Văn A
+                    phone: "0912345678"
+                    role: user
+                    timezone: Asia/Ho_Chi_Minh
+                    createdAt: "2024-01-02T00:00:00Z"
+                    updatedAt: "2024-01-02T00:00:00Z"
+                nextCursor: null
+                total: 2
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/users/{userId}:
+    get:
+      tags: [Admin]
+      summary: Chi tiết một user
+      description: Yêu cầu role `admin`.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      responses:
+        '200':
+          description: Thông tin chi tiết user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /admin/users/{userId}/role:
+    patch:
+      tags: [Admin]
+      summary: Đổi role của user
+      description: |-
+        Yêu cầu role `admin`.
+
+        **Ràng buộc:**
+        - Admin không thể tự thay đổi role của chính mình (trả về 403).
+        - Role hợp lệ: `admin`, `manager`, `user`.
+
+        **Ảnh hưởng ngay lập tức:** JWT access token hiện tại của user vẫn hợp lệ
+        đến khi expire, nhưng lần `POST /auth/refresh` tiếp theo sẽ lấy role mới từ DB.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/UserId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateRoleRequest'
+            examples:
+              promote_to_manager:
+                summary: Nâng lên Manager
+                value:
+                  role: manager
+              promote_to_admin:
+                summary: Nâng lên Admin
+                value:
+                  role: admin
+              demote_to_user:
+                summary: Hạ xuống User
+                value:
+                  role: user
+      responses:
+        '200':
+          description: User sau khi cập nhật role.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminUser'
+              example:
+                userId: b7c3d2e1-f90c-23e4-b567-537725285111
+                email: user@example.com
+                name: Nguyễn Văn A
+                phone: "0912345678"
+                role: manager
+                timezone: Asia/Ho_Chi_Minh
+                createdAt: "2024-01-02T00:00:00Z"
+                updatedAt: "2024-03-10T08:30:00Z"
+        '400':
+          description: Role không hợp lệ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: "role phải là một trong: admin, manager, user"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          description: Không đủ quyền hoặc admin tự đổi role của mình.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                not_admin:
+                  summary: Không phải admin
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: Only admin can access this resource. Your role - user
+                self_update:
+                  summary: Tự đổi role mình
+                  value:
+                    error:
+                      code: FORBIDDEN
+                      message: không thể thay đổi role của chính mình
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+
+# ── BƯỚC 3: SCHEMAS — paste sau block EmailSettingsInput ─────────────────────
+
+    AdminUser:
+      type: object
+      description: Thông tin user đầy đủ, dành cho admin.
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        phone:
+          type: string
+        role:
+          type: string
+          enum: [admin, manager, user]
+        timezone:
+          type: string
+          example: Asia/Ho_Chi_Minh
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AdminUserListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminUser'
+        nextCursor:
+          type: string
+          format: uuid
+          nullable: true
+          description: userId của bản ghi cuối cùng — dùng làm `cursor` cho trang tiếp theo.
+        total:
+          type: integer
+          description: Tổng số users theo filter hiện tại (không phụ thuộc pagination).
+          example: 42
+
+    UpdateRoleRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, manager, user]
+          description: Role mới của user.
+          example: manager
+
+
+# ── BƯỚC 4: PARAMETERS — paste vào trong `components.parameters` ─────────────
+#  (hiện tại chỉ có AlertId, thêm UserId vào cạnh đó)
+
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: UUID của user trong PostgreSQL.
+      schema:
+        type: string
+        format: uuid

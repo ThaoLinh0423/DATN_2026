@@ -1,0 +1,35 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+        NODE_ENV: ${NODE_ENV}
+    container_name: vite-react-app
+    ports:
+      - "5173:8080"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    env_file:
+      - .env
+    command: npm run dev
+    stdin_open: true
+    tty: true
+
+  prod:
+    build:
+      context: .
+      dockerfile: Dockerfile.prod
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+        NODE_ENV: ${NODE_ENV}
+    container_name: vite-react-prod
+    ports:
+      - "5173:80"
+    env_file:
+      - .env
+  networks:
+  air_quality_shared:
+    external: true

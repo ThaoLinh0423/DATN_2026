@@ -1,0 +1,102 @@
+@startuml AirQualityMonitoring_SystemUseCase
+!theme plain
+skinparam actorStyle awesome
+
+title Air Quality Monitoring System - Use Case Diagram
+
+' === ACTORS ===
+actor "Khách (Anonymous)" as ANONYMOUS
+actor "Người dùng (User)" as USER
+actor "Quản lý (Manager)" as MANAGER
+actor "Quản trị viên (Admin)" as ADMIN
+actor "System Service" as SYSTEM
+
+' === USE CASES ===
+
+' Anonymous User Use Cases
+usecase "UC01: Đăng nhập hệ thống" as UC01_LOGIN
+
+' User Use Cases
+usecase "UC02: Xem Dashboard giám sát chất lượng không khí" as UC02_DASHBOARD
+usecase "UC04: Xem danh sách Alerts" as UC04_VIEW_ALERTS
+usecase "UC07: Xem dự báo ML (ML Forecast)" as UC07_ML_FORECAST
+
+' Manager Use Cases
+usecase "UC08: Tạo mới Sensor" as UC08_CREATE_SENSOR
+usecase "UC09: Cấp quyền truy cập Sensor cho User" as UC09_GRANT_ACCESS
+usecase "UC10: Khám phá thiết bị từ InfluxDB" as UC10_DISCOVER
+
+' Admin Use Cases
+usecase "UC06: Cấu hình ngưỡng cảnh báo" as UC06_THRESHOLD
+
+' System Service Use Cases
+usecase "UC03: RealtimePoller - Thu thập và phát dữ liệu real-time" as UC03_REALTIME
+usecase "UC05: AlertService - Dịch vụ tạo alerts tự động" as UC05_ALERT_SERVICE
+
+' === RELATIONSHIPS ===
+
+' Anonymous -> Login
+ANONYMOUS --> UC01_LOGIN
+
+' User -> Use Cases
+USER --> UC02_DASHBOARD
+USER --> UC04_VIEW_ALERTS
+USER --> UC07_ML_FORECAST
+
+' Manager -> Use Cases
+MANAGER --> UC08_CREATE_SENSOR
+MANAGER --> UC09_GRANT_ACCESS
+MANAGER --> UC10_DISCOVER
+
+' Admin -> Use Cases
+ADMIN --> UC06_THRESHOLD
+
+' System -> Use Cases
+SYSTEM --> UC03_REALTIME
+SYSTEM --> UC05_ALERT_SERVICE
+
+' === INCLUDES / EXTENDS RELATIONSHIPS ===
+
+' Dashboard includes other views
+UC02_DASHBOARD ..> UC04_VIEW_ALERTS : <<include>>
+UC02_DASHBOARD ..> UC07_ML_FORECAST : <<include>>
+
+' AlertService triggered by RealtimePoller
+UC03_REALTIME ..> UC05_ALERT_SERVICE : <<include>>
+
+' Discover leads to Create Sensor
+UC10_DISCOVER ..> UC08_CREATE_SENSOR : <<extend>>
+
+' Threshold settings affects AlertService
+UC06_THRESHOLD ..> UC05_ALERT_SERVICE : <<include>>
+
+' Login leads to Dashboard
+UC01_LOGIN ..> UC02_DASHBOARD : <<extend>>
+
+' Grant Access related to View Sensor
+UC09_GRANT_ACCESS ..> UC02_DASHBOARD : <<include>>
+
+' === GROUPS / PACKAGES ===
+
+package "Actor: Khách" {
+  leftgoals
+  ANONYMOUS
+}
+
+package "Actor: Người dùng" {
+  USER
+}
+
+package "Actor: Quản lý" {
+  MANAGER
+}
+
+package "Actor: Quản trị viên" {
+  ADMIN
+}
+
+package "Actor: Hệ thống" {
+  SYSTEM
+}
+
+@enduml

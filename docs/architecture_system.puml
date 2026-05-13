@@ -1,0 +1,169 @@
+@startuml AirQualitySystemArchitecture
+!theme plain
+
+title KIẾN TRÚC HỆ THỐNG GIÁM SÁT CHẤT LƯỢNG KHÔNG KHÍ
+
+' === STYLES ===
+skinparam componentStyle rectangle
+skinparam defaultFontSize 11
+skinparam roundcorner 8
+
+' === LAYERS ===
+rectangle "Layer 1: Thiết bị đo" <<device>> #LightBlue
+rectangle "Layer 2: Truyền dữ liệu" <<transmission>> #LightGreen
+rectangle "Layer 3: Backend (Go)" <<backend>> #LightYellow
+rectangle "Layer 4: ML Service (Python)" <<ml>> #LightPink
+rectangle "Layer 5: Frontend (React)" <<frontend>> #LightCyan
+
+' === LAYER 1: DEVICE LAYER ===
+package "Layer 1: Thiết bị đo" {
+  [ESP32 Sensor Node] as ESP32
+  [Cảm biến đo PM1.0\nPM2.5, PM10] as PM_SENSOR
+  [Cảm biến nhiệt độ\n& độ ẩm] as DHT_SENSOR
+  [Công tắc cảnh báo\nngưỡng] as THRESHOLD_SW
+}
+
+ESP32 --> PM_SENSOR : Serial
+ESP32 --> DHT_SENSOR : Serial
+PM_SENSOR ..> THRESHOLD_SW : Ngưỡng WHO
+DHT_SENSOR ..> THRESHOLD_SW : Ngưỡng WHO
+
+' === MQTT BROKER ===
+package "Layer 2: Truyền dữ liệu" {
+  [MQTT Broker\n(Mosquitto:1883)] as MQTT_BROKER
+  [Telegraf\n(MQTT Consumer)] as TELEGRAF
+  [InfluxDB Cloud\n(HTTPS API)] as INFLUXDB
+
+  MQTT_BROKER --> TELEGRAF : MQTT (TCP)
+  TELEGRAF --> INFLUXDB : Line Protocol (HTTPS)
+}
+
+ESP32 --> MQTT_BROKER : MQTT
+ESP32 <--> THRESHOLD_SW : Cảnh báo local
+
+' === INFLUXDB DATA STRUCTURE ===
+note bottom of INFLUXDB
+**Measurement:** sensor_data
+**Tags:** sensor_node, location, host, topic
+**Fields:** pm1, pm25, pm10, temperature, humidity, heat_index, aqi, comfort
+end note
+
+' === BACKEND LAYER ===
+package "Layer 3: Backend (Go:8088)" {
+  [RealtimePoller\n(30s interval)] as POLLER
+  [WebSocketService] as WS_SERVICE
+  [InfluxService] as INFLUX_SERVICE
+  [AlertService] as ALERT_SERVICE
+  [MLService] as ML_CLIENT
+
+  [REST API\n(Gin Framework)] as REST_API
+
+  database "PostgreSQL\n(Metadata)" as POSTGRES {
+    [users]
+    [sensors]
+    [alerts]
+    [settings]
+    [sessions]
+  }
+}
+
+INFLUXDB --> INFLUX_SERVICE : Query API
+INFLUX_SERVICE --> POLLER : Latest data
+POLLER --> WS_SERVICE : Broadcast
+POLLER --> ALERT_SERVICE : Check threshold
+ALERT_SERVICE --> POSTGRES : Save alerts
+INFLUX_SERVICE --> REST_API : Query data
+ML_CLIENT --> REST_API : Forecast
+WS_SERVICE --> REST_API : Real-time
+
+' === REST API ENDPOINTS ===
+note right of REST_API
+**Endpoints:**
+- /v1/auth/* - Authentication
+- /v1/data/* - InfluxDB queries
+- /v1/forecast/* - ML forecasting
+- /v1/alerts/* - Alert management
+- /v1/sensors/* - Sensor CRUD
+- /v1/settings/* - Configuration
+- /v1/ws/realtime - WebSocket
+end note
+
+' === ML SERVICE ===
+package "Layer 4: ML Service (Python:8000)" {
+  [FastAPI Server] as FASTAPI
+  [LSTM Model] as LSTM_MODEL
+  [GRU Model] as GRU_MODEL
+  [BiLSTM Model] as BILSTM_MODEL
+  [Informer Model] as INFORMER_MODEL
+  [ARIMA Model] as ARIMA_MODEL
+
+  [Drift Monitoring\n(PSI-based)] as DRIFT_MON
+
+  FASTAPI --> LSTM_MODEL : predict
+  FASTAPI --> GRU_MODEL : predict
+  FASTAPI --> BILSTM_MODEL : predict
+  FASTAPI --> INFORMER_MODEL : predict
+  FASTAPI --> ARIMA_MODEL : predict
+
+  LSTM_MODEL ..> DRIFT_MON : monitor
+  GRU_MODEL ..> DRIFT_MON : monitor
+  BILSTM_MODEL ..> DRIFT_MON : monitor
+  INFORMER_MODEL ..> DRIFT_MON : monitor
+}
+
+ML_CLIENT ..> FASTAPI : HTTP POST /forecast
+FASTAPI ..> DRIFT_MON : track drift
+
+' === FRONTEND LAYER ===
+package "Layer 5: Frontend (React:5173)" {
+  [useWebSocket Hook] as WS_HOOK
+  [useApi Hooks\n(React Query)] as API_HOOKS
+
+  [Dashboard\n(Index.tsx)] as DASHBOARD
+  [KpiCard] as KPI
+  [PMChart] as PM_CHART
+  [AqiGauge] as AQI_GAUGE
+  [Heatmap] as HEATMAP
+  [ForecastTable] as FORECAST_TABLE
+  [DriftTrackingSection] as DRIFT_UI
+
+  [Pages:\nLocations, Alerts\nSettings, Reports] as OTHER_PAGES
+}
+
+WS_HOOK --> DASHBOARD : Realtime data
+API_HOOKS --> DASHBOARD : REST API
+DASHBOARD --> KPI : display
+DASHBOARD --> PM_CHART : display
+DASHBOARD --> AQI_GAUGE : display
+DASHBOARD --> HEATMAP : display
+DASHBOARD --> FORECAST_TABLE : ML forecast
+DASHBOARD --> DRIFT_UI : drift status
+DASHBOARD --> OTHER_PAGES : navigation
+
+' === CONNECTIONS ===
+REST_API -up-> WS_HOOK : WSS
+REST_API -up-> API_HOOKS : HTTPS
+
+' === DATA FLOW ARROWS ===
+note as N1
+**Luồng dữ liệu chính:**
+1. ESP32 gửi JSON qua MQTT → Broker
+2. Telegraf parse → InfluxDB line protocol
+3. InfluxDB lưu time-series data
+4. RealtimePoller (30s) → QueryLatest
+5. Broadcast WebSocket → Frontend
+6. AlertService kiểm tra ngưỡng → PostgreSQL
+7. User request forecast → ML API → Response
+end note
+
+' === LEGEND ===
+legend bottom right
+  | Màu | Lớp |
+  | <back:#LightBlue>   </back> | Thiết bị đo |
+  | <back:#LightGreen>  </back> | Truyền dữ liệu |
+  | <back:#LightYellow> </back> | Backend (Go) |
+  | <back:#LightPink>   </back> | ML Service (Python) |
+  | <back:#LightCyan>   </back> | Frontend (React) |
+end legend
+
+@enduml

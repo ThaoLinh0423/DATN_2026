@@ -1,0 +1,50 @@
+services:
+  postgres:
+    image: postgres:15
+    container_name: air_quality_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: air_quality_db
+      POSTGRES_USER: air_quality_user
+      POSTGRES_PASSWORD: air_quality_password
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U air_quality_user -d air_quality_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - air_quality_net
+
+  backend:
+    build: .
+    container_name: go_backend
+    restart: unless-stopped
+    ports:
+      - "8088:8088"
+    env_file:
+      - .env
+    environment:
+      - DB_HOST=air_quality_postgres
+      - DB_PORT=5432
+      - DB_NAME=air_quality_db
+      - DB_USER=air_quality_user
+      - DB_PASSWORD=air_quality_password
+      - SERVER_PORT=8088
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - air_quality_net
+
+volumes:
+  postgres_data:
+
+networks:
+  air_quality_net:
+    driver: bridge
