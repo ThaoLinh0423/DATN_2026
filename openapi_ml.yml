@@ -1,0 +1,330 @@
+openapi: 3.0.3
+info:
+  title: Air Quality ML Forecast API
+  description: |-
+    Tài liệu cho endpoint dự báo chất lượng không khí sử dụng các mô hình ML
+    (LSTM, GRU, BiLSTM, Transformer) được triển khai qua Python FastAPI.
+    ## Kiến trúc
+    | Layer | Công nghệ | Vai trò |
+    |-------|-----------|---------|
+    | Go Backend | Gin | Proxy + Auth + Route |
+    | ML Service | Python FastAPI | Model inference |
+    | Models | TensorFlow/Keras | LSTM, GRU, BiLSTM, Transformer |
+    | Data | CSV / InfluxDB | Nguồn dữ liệu huấn luyện |
+    ## Luồng dữ liệu
+    ```
+    Client
+      → GET /v1/forecast/:modelKey  (JWT required)
+      → Go Backend (air-quality-api)
+      → GET /forecast/:modelKey  (Python FastAPI, internal)
+      → Model inference (TensorFlow)
+      → Forecast JSON
+    ```
+    ## Các mô hình hỗ trợ
+    | modelKey | Mô hình | Ghi chú |
+    |----------|---------|---------|
+    | `lstm` | Stacked LSTM | Multi-feature, direct/iterative forecast |
+    | `gru` | Stacked GRU | Nhanh hơn LSTM ~20-30%, ít tham số hơn |
+    | `bilstm` | Bidirectional LSTM | Học cả hai chiều thời gian |
+    | `transformer` | Transformer | Attention-based, tốt cho chuỗi dài |
+    ## Cấu hình dự báo
+    Các tham số dự báo được đọc từ `configs/config.py` của ML service:
+    | Tham số | Mặc định | Mô tả |
+    |---------|----------|-------|
+    | `HORIZON` | 12 | Số bước dự báo phía trước |
+    | `LOOK_BACK` | 24 | Cửa sổ lịch sử đầu vào (giờ) |
+    | `RESAMPLE_FREQ` | `h` | Tần suất lấy mẫu |
+    | `FORECAST_MODE` | `direct` | `direct` hoặc `iterative` |
+    | `FEATURES` | 7 features | pm1_0, pm2_5, pm10, temperature, humidity, heatindex, aqi |
+    ## Ngưỡng cảnh báo
+    Alerts được tính dựa trên `THRESHOLDS` trong `config.py`:
+    | Feature | Ngưỡng mặc định |
+    |---------|----------------|
+    | `pm2_5` | > 50 µg/m³ |
+    | `aqi` | > 100 |
+    ## Xác thực
+    JWT Bearer token — giống với toàn bộ API còn lại.
+    ```
+    Authorization: Bearer <accessToken>
+    ```
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8088/v1
+    description: Go Backend (proxy đến ML service)
+  - url: http://localhost:8000
+    description: Python FastAPI ML service (internal — không expose ra ngoài)
+
+tags:
+  - name: Forecast
+    description: Dự báo chất lượng không khí từ mô hình ML đã huấn luyện.
+
+paths:
+
+  /forecast/{modelKey}:
+    get:
+      tags: [Forecast]
+      summary: Lấy dự báo từ mô hình ML
+      description: |-
+        Load mô hình đã train từ disk, đọc data mới nhất, chạy `forecast_future()`
+        và trả về `horizon` bước dự báo phía trước kể từ timestamp cuối cùng trong data.
+        **Lần gọi đầu tiên** sẽ load model vào memory (~2-5s).
+        **Các lần tiếp theo** dùng cache — response nhanh hơn.
+        Để force reload model từ disk (sau khi retrain), gọi:
+        ```
+        POST /v1/forecast/cache/clear
+        ```
+        ### Ví dụ response với `modelKey=gru`, `HORIZON=12`, `RESAMPLE_FREQ=h`
+        Response sẽ chứa 12 điểm dự báo, mỗi điểm cách nhau 1 giờ.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: modelKey
+          in: path
+          required: true
+          description: Tên mô hình ML cần dùng để dự báo.
+          schema:
+            type: string
+            enum: [lstm, gru, bilstm, transformer]
+            example: gru
+      responses:
+        '200':
+          description: Dự báo thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ForecastResponse'
+              example:
+                model: gru
+                horizon: 12
+                resample_freq: h
+                forecast:
+                  - timestamp: "2026-02-27T00:00:00+00:00"
+                    pm1_0: 18.34
+                    pm2_5: 52.09
+                    pm10: 68.41
+                    temperature: 27.5
+                    humidity: 74.2
+                    heatindex: 30.1
+                    aqi: 119.77
+                  - timestamp: "2026-02-27T01:00:00+00:00"
+                    pm1_0: 17.81
+                    pm2_5: 50.87
+                    pm10: 65.23
+                    temperature: 27.1
+                    humidity: 75.0
+                    heatindex: 29.8
+                    aqi: 126.66
+                alerts:
+                  pm2_5:
+                    - timestamp: "2026-02-27T00:00:00+00:00"
+                      value: 52.09
+                    - timestamp: "2026-02-27T01:00:00+00:00"
+                      value: 50.87
+                  aqi:
+                    - timestamp: "2026-02-27T00:00:00+00:00"
+                      value: 119.77
+                    - timestamp: "2026-02-27T01:00:00+00:00"
+                      value: 126.66
+        '400':
+          description: modelKey không hợp lệ.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: VALIDATION_ERROR
+                  message: "Invalid modelKey. Allowed: lstm, gru, bilstm, transformer"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: ML service không phản hồi hoặc trả lỗi.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: ML_SERVICE_ERROR
+                  message: "ml service unavailable: connection refused"
+        '503':
+          description: |-
+            Artifacts mô hình chưa có trên disk.
+            Cần chạy training trước: `python run.py` (trong airquality-ml-modeling).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: ML_SERVICE_ERROR
+                  message: "ml service returned 503: Model 'gru' artifacts not found. Run training first."
+
+  /forecast/cache/clear:
+    post:
+      tags: [Forecast]
+      summary: Xóa cache model trong ML service
+      description: |-
+        Gọi `POST /cache/clear` trên Python FastAPI để evict tất cả model đang giữ trong memory.
+        **Dùng khi:** vừa retrain xong và muốn API load model mới mà không cần restart server.
+        Lần gọi `/forecast/:modelKey` tiếp theo sẽ load lại từ disk.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Cache đã được xóa.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: Model cache cleared.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '502':
+          description: Không thể kết nối đến ML service.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Token thiếu hoặc không hợp lệ.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: ML_SERVICE_ERROR
+            message:
+              type: string
+              example: ml service unavailable
+
+    ForecastPoint:
+      type: object
+      description: Một bước dự báo tại một timestamp cụ thể.
+      properties:
+        timestamp:
+          type: string
+          description: ISO 8601 timestamp (UTC).
+          example: "2026-02-27T00:00:00+00:00"
+        pm1_0:
+          type: number
+          format: float
+          nullable: true
+          description: Bụi mịn PM1.0 (µg/m³).
+          example: 18.34
+        pm2_5:
+          type: number
+          format: float
+          nullable: true
+          description: Bụi mịn PM2.5 (µg/m³).
+          example: 52.09
+        pm10:
+          type: number
+          format: float
+          nullable: true
+          description: Bụi mịn PM10 (µg/m³).
+          example: 68.41
+        temperature:
+          type: number
+          format: float
+          nullable: true
+          description: Nhiệt độ (°C).
+          example: 27.5
+        humidity:
+          type: number
+          format: float
+          nullable: true
+          description: Độ ẩm (%).
+          example: 74.2
+        heatindex:
+          type: number
+          format: float
+          nullable: true
+          description: Chỉ số nhiệt / cảm giác nhiệt độ (°C).
+          example: 30.1
+        aqi:
+          type: number
+          format: float
+          nullable: true
+          description: Chỉ số chất lượng không khí AQI.
+          example: 119.77
+
+    MLAlert:
+      type: object
+      description: Một điểm dự báo vượt ngưỡng cảnh báo.
+      properties:
+        timestamp:
+          type: string
+          description: ISO 8601 timestamp của điểm vượt ngưỡng.
+          example: "2026-02-27T00:00:00+00:00"
+        value:
+          type: number
+          format: float
+          description: Giá trị dự báo tại timestamp đó.
+          example: 52.09
+
+    ForecastResponse:
+      type: object
+      description: |-
+        Kết quả dự báo đầy đủ từ mô hình ML.
+        `alerts` chỉ xuất hiện khi có ít nhất một điểm dự báo vượt ngưỡng trong `config.THRESHOLDS`.
+      properties:
+        model:
+          type: string
+          description: Tên mô hình đã chạy.
+          enum: [lstm, gru, bilstm, transformer]
+          example: gru
+        horizon:
+          type: integer
+          description: Số bước dự báo thực tế trả về (= `config.HORIZON`).
+          example: 12
+        resample_freq:
+          type: string
+          description: Tần suất lấy mẫu của dữ liệu (= `config.RESAMPLE_FREQ`).
+          example: h
+        forecast:
+          type: array
+          description: Danh sách `horizon` điểm dự báo, sắp xếp theo thời gian tăng dần.
+          items:
+            $ref: '#/components/schemas/ForecastPoint'
+        alerts:
+          type: object
+          description: |-
+            Map feature → danh sách điểm vượt ngưỡng.
+            Key là tên feature (vd: `pm2_5`, `aqi`).
+            Trả về object rỗng `{}` nếu không có cảnh báo.
+          additionalProperties:
+            type: array
+            items:
+              $ref: '#/components/schemas/MLAlert'
+          example:
+            pm2_5:
+              - timestamp: "2026-02-27T00:00:00+00:00"
+                value: 52.09
+            aqi:
+              - timestamp: "2026-02-27T00:00:00+00:00"
+                value: 119.77

@@ -1,0 +1,1652 @@
+openapi: 3.0.3
+info:
+  title: Air Quality API
+  description: |-
+    REST API và WebSocket cho hệ thống giám sát chất lượng không khí.
+
+    ## Kiến trúc
+
+    | Layer | Công nghệ | Vai trò |
+    |-------|-----------|---------|
+    | HTTP API | Go + Gin | REST endpoints |
+    | Auth | JWT (HMAC) | Xác thực & phân quyền |
+    | Database | PostgreSQL | Users, sensors, alerts, settings |
+    | Time-series | InfluxDB Cloud | Dữ liệu đo từ cảm biến |
+    | Realtime | WebSocket + Poller | Push dữ liệu mỗi 30s |
+
+    ## Luồng dữ liệu cảm biến
+
+    ```
+    ESP32 → MQTT (HiveMQ) → Telegraf → InfluxDB Cloud
+                                              ↓
+                                     Backend poll mỗi 30s
+                                              ↓  lookup device_id → sensor_id (UUID)
+                                    WebSocket → Frontend
+    ```
+
+    ## Mapping sensor ID
+
+    Hệ thống có 2 loại ID cho sensor:
+
+    | ID | Nguồn | Ví dụ | Dùng ở đâu |
+    |----|-------|-------|------------|
+    | `sensorId` (UUID) | PostgreSQL | `a3f2b1c4-...` | REST API, WebSocket subscribe |
+    | `deviceId` (string) | InfluxDB tag `sensor_node` | `esp32_sensor_001` | Query data, discover |
+
+    **Quy tắc:** Mọi giao tiếp với client đều dùng `sensorId` (UUID). Backend tự xử lý việc mapping sang `deviceId` khi query InfluxDB.
+
+    ## InfluxDB API Key (per-user)
+
+    Mỗi user tự lưu InfluxDB credentials của mình qua `PUT /settings/influx`.
+    Sau đó gọi `GET /settings/influx/discover` để tự động phát hiện danh sách cảm biến
+    có trong bucket — không cần đăng ký sensor thủ công.
+
+    ## Xác thực
+
+    JWT Bearer token. Lấy từ `POST /auth/login`, gửi kèm mọi request cần auth:
+    ```
+    Authorization: Bearer <accessToken>
+    ```
+
+    ## Phân quyền
+
+    - `user` — đọc dữ liệu, quản lý tài khoản cá nhân, lưu InfluxDB key.
+    - `manager` — tất cả quyền user + tạo sensor.
+    - `admin` — tất cả quyền + cấu hình hệ thống (ngưỡng, email, general).
+
+  version: 2.2.0
+
+servers:
+  - url: http://localhost:8088/v1
+    description: Local development
+  - url: https://api.yourdomain.com/v1
+    description: Production
+
+tags:
+  - name: Auth
+    description: Đăng ký, đăng nhập, làm mới token.
+  - name: Users
+    description: Quản lý thông tin cá nhân và phiên đăng nhập.
+  - name: Sensors
+    description: Quản lý metadata cảm biến trong PostgreSQL.
+  - name: Data
+    description: Truy vấn dữ liệu realtime và lịch sử từ InfluxDB Cloud.
+  - name: Alerts
+    description: Cảnh báo tự động khi dữ liệu vượt ngưỡng.
+  - name: Settings - InfluxDB
+    description: Cấu hình InfluxDB API key và tự động discover cảm biến.
+  - name: Settings - System
+    description: Cài đặt hệ thống (admin). Ngưỡng cảnh báo, email SMTP, cài đặt chung.
+  - name: Settings - User
+    description: Cài đặt cá nhân — thông báo.
+  - name: WebSocket
+    description: Kết nối realtime nhận dữ liệu cảm biến.
+
+paths:
+
+  # ==================== AUTH ====================
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Đăng ký tài khoản mới
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+            example:
+              email: user@example.com
+              password: strongpassword123
+              timezone: Asia/Ho_Chi_Minh
+      responses:
+        '201':
+          description: Đăng ký thành công.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  userId:
+                    type: string
+                    format: uuid
+                  email:
+                    type: string
+                    format: email
+                  message:
+                    type: string
+                    example: User registered successfully
+              example:
+                userId: 123e4567-e89b-12d3-a456-426614174000
+                email: user@example.com
+                message: User registered successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Đăng nhập, nhận JWT token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            example:
+              email: user@example.com
+              password: strongpassword123
+      responses:
+        '200':
+          description: Đăng nhập thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Làm mới access token bằng refresh token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken:
+                  type: string
+      responses:
+        '200':
+          description: Token mới (không bao gồm refreshToken).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accessToken:
+                    type: string
+                  tokenType:
+                    type: string
+                    example: Bearer
+                  expiresIn:
+                    type: integer
+                    example: 3600
+              example:
+                accessToken: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+                tokenType: Bearer
+                expiresIn: 3600
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==================== USERS ====================
+
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Xem thông tin bản thân
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Thông tin user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags: [Users]
+      summary: Cập nhật thông tin cá nhân
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  example: Nguyễn Văn A
+                email:
+                  type: string
+                  format: email
+                phone:
+                  type: string
+                  example: "0912345678"
+      responses:
+        '200':
+          description: Cập nhật thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/me/change-password:
+    post:
+      tags: [Users]
+      summary: Đổi mật khẩu
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [currentPassword, newPassword]
+              properties:
+                currentPassword:
+                  type: string
+                newPassword:
+                  type: string
+                  minLength: 8
+      responses:
+        '200':
+          description: Đổi mật khẩu thành công.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/me/sessions:
+    get:
+      tags: [Users]
+      summary: Danh sách phiên đăng nhập
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Danh sách sessions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/UserSession'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /users/me/logout:
+    post:
+      tags: [Users]
+      summary: Đăng xuất phiên hiện tại
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Đăng xuất thành công.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==================== SENSORS ====================
+
+  /sensors:
+    get:
+      tags: [Sensors]
+      summary: Danh sách cảm biến
+      description: |-
+        Public endpoint — không cần đăng nhập.
+        Trả về metadata của các sensor đã được đăng ký trong PostgreSQL.
+
+        `sensorId` (UUID) là ID dùng để **subscribe WebSocket**.
+        `deviceId` là tag InfluxDB dùng để **query /data/latest và /data/historical**.
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+            maximum: 100
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Danh sách sensor.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Sensor'
+                  nextCursor:
+                    type: string
+                    nullable: true
+
+    post:
+      tags: [Sensors]
+      summary: Đăng ký sensor mới
+      description: |-
+        Yêu cầu quyền `admin` hoặc `manager`.
+
+        `deviceId` phải khớp chính xác với tag `sensor_node` trong InfluxDB (thường là lowercase).
+        Dùng `GET /settings/influx/discover` để lấy danh sách `deviceId` có sẵn.
+
+        Sau khi tạo thành công, sensor được **đăng ký vào Realtime Poller ngay lập tức**
+        mà không cần restart server.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SensorInput'
+            example:
+              name: Cảm biến phòng khách
+              deviceId: esp32_sensor_001
+              topicPath: customer_a/sensor_001/all
+              customerId: customer_a
+              location:
+                latitude: 21.0285
+                longitude: 105.8542
+              type: iot
+      responses:
+        '201':
+          description: Tạo thành công. Sensor được poll ngay ở lần tick tiếp theo (≤ 30s).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Sensor'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ==================== DATA ====================
+
+  /data/latest:
+    get:
+      tags: [Data]
+      summary: Điểm đo mới nhất của một cảm biến
+      description: |-
+        Trả về bản ghi mới nhất từ InfluxDB Cloud trong vòng **5 phút** gần nhất.
+
+        **Parameter chính:** `sensorNode` — tương ứng với tag `sensor_node` trong InfluxDB
+        (= `deviceId` của sensor, thường là lowercase, ví dụ `esp32_sensor_001`).
+
+        **Các chỉ số trả về:**
+        - `pm1`, `pm25`, `pm10` — bụi mịn (µg/m³)
+        - `temperature` — nhiệt độ (°C)
+        - `humidity` — độ ẩm (%)
+        - `heatIndex` — chỉ số nhiệt / cảm giác nhiệt độ (°C)
+        - `comfort` — mức thoải mái: `Comfortable`, `Hot`, `Very Hot`...
+        - `aqiStatus` — trạng thái AQI: `Good`, `Moderate`, `Unhealthy`...
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: sensorNode
+          in: query
+          required: true
+          description: Tag `sensor_node` trong InfluxDB (= `deviceId` của sensor).
+          schema:
+            type: string
+            example: esp32_sensor_001
+      responses:
+        '200':
+          description: Điểm đo mới nhất.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DataPoint'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Không có dữ liệu trong 5 phút gần nhất.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /data/historical:
+    get:
+      tags: [Data]
+      summary: Dữ liệu lịch sử theo khoảng thời gian
+      description: |-
+        Truy vấn InfluxDB Cloud theo `deviceId` và khoảng thời gian.
+
+        Thời gian theo định dạng **RFC3339**: `2024-01-01T00:00:00Z`.
+
+        Kết quả được sắp xếp mới nhất trước (`desc`). Tối đa **1000** điểm mỗi request.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: deviceId
+          in: query
+          required: true
+          description: Tag `device_id` trong InfluxDB (= `deviceId` của sensor).
+          schema:
+            type: string
+            example: esp32_sensor_001
+        - name: startTime
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+            example: "2024-03-01T00:00:00Z"
+        - name: endTime
+          in: query
+          required: true
+          schema:
+            type: string
+            format: date-time
+            example: "2024-03-02T00:00:00Z"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 100
+            maximum: 1000
+      responses:
+        '200':
+          description: Danh sách điểm đo lịch sử.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DataPoint'
+                  nextCursor:
+                    type: string
+                    nullable: true
+                    description: Luôn null — InfluxDB dùng time range thay vì cursor.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==================== ALERTS ====================
+
+  /alerts:
+    get:
+      tags: [Alerts]
+      summary: Danh sách cảnh báo
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: status
+          in: query
+          description: Lọc theo trạng thái.
+          schema:
+            type: string
+            enum: [all, active, inactive]
+            default: all
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Danh sách alerts.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Alert'
+                  nextCursor:
+                    type: string
+                    nullable: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /alerts/statistics:
+    get:
+      tags: [Alerts]
+      summary: Thống kê tổng hợp cảnh báo
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Thống kê.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertStatistics'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /alerts/check:
+    post:
+      tags: [Alerts]
+      summary: Kiểm tra giá trị và tạo alert thủ công
+      description: |-
+        So sánh giá trị đầu vào với `ThresholdSettings`, tạo alert nếu vượt ngưỡng.
+        Thông thường alert được tạo **tự động** bởi RealtimePoller mỗi 30s.
+        Endpoint này dùng để test hoặc tích hợp nguồn dữ liệu ngoài.
+
+        **Logic ưu tiên:** PM2.5 → PM10 → AQI (chỉ tạo 1 alert mỗi lần check).
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [sensorId]
+              properties:
+                sensorId:
+                  type: string
+                  format: uuid
+                  description: UUID sensor trong PostgreSQL.
+                pm25:
+                  type: number
+                  format: float
+                  example: 80.0
+                pm10:
+                  type: number
+                  format: float
+                  example: 120.0
+                aqi:
+                  type: number
+                  format: float
+                  example: 180.0
+      responses:
+        '200':
+          description: Kết quả kiểm tra.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AlertCheckResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /alerts/bulk/update-status:
+    post:
+      tags: [Alerts]
+      summary: Cập nhật trạng thái nhiều alerts cùng lúc
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [alertIds, is_active]
+              properties:
+                alertIds:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  example: ["uuid-1", "uuid-2"]
+                is_active:
+                  type: boolean
+                  example: false
+      responses:
+        '200':
+          description: Số alert đã cập nhật.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  updatedCount:
+                    type: integer
+                    example: 3
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /alerts/{alertId}:
+    get:
+      tags: [Alerts]
+      summary: Chi tiết một alert
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AlertId'
+      responses:
+        '200':
+          description: Chi tiết alert.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    put:
+      tags: [Alerts]
+      summary: Cập nhật trạng thái một alert
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AlertId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [is_active]
+              properties:
+                is_active:
+                  type: boolean
+                  example: false
+      responses:
+        '200':
+          description: Alert sau khi cập nhật.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Alert'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      tags: [Alerts]
+      summary: Xóa alert
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/AlertId'
+      responses:
+        '200':
+          description: Xóa thành công.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # ==================== SETTINGS — INFLUXDB ====================
+
+  /settings/influx:
+    get:
+      tags: [Settings - InfluxDB]
+      summary: Xem InfluxDB settings của bản thân
+      description: |-
+        Trả về cấu hình InfluxDB Cloud đã lưu.
+        **Token bị mask:** chỉ hiển thị 4 ký tự đầu và 4 ký tự cuối.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: InfluxDB settings (token masked).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfluxSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Chưa cấu hình InfluxDB settings.
+
+    put:
+      tags: [Settings - InfluxDB]
+      summary: Lưu hoặc cập nhật InfluxDB API key
+      description: |-
+        Lưu InfluxDB credentials vào tài khoản.
+        API sẽ **tự động ping InfluxDB** để kiểm tra kết nối trước khi lưu.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InfluxSettingsInput'
+      responses:
+        '200':
+          description: Lưu thành công.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfluxSettings'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    delete:
+      tags: [Settings - InfluxDB]
+      summary: Xóa InfluxDB settings
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Đã xóa.
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /settings/influx/discover:
+    get:
+      tags: [Settings - InfluxDB]
+      summary: Tự động discover danh sách cảm biến từ InfluxDB
+      description: |-
+        Dùng API token đã lưu để query schema InfluxDB, trả về tất cả `sensor_node`
+        có dữ liệu trong **30 ngày** gần nhất.
+
+        Kết quả `deviceId` trong response = tag `sensor_node` trong InfluxDB.
+        Dùng giá trị này để:
+        - Query `/data/latest?sensorNode=<deviceId>`
+        - Đăng ký sensor vào PostgreSQL qua `POST /sensors` (`deviceId` field)
+
+        **Yêu cầu:** phải cấu hình InfluxDB settings trước qua `PUT /settings/influx`.
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Danh sách devices phát hiện được.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InfluxDiscoverResponse'
+              example:
+                devices:
+                  - deviceId: esp32_sensor_001
+                    location: living_room
+                  - deviceId: esp32_sensor_002
+                    location: bedroom
+                bucket: SENSOR
+                measurement: sensor_data
+                total: 2
+        '400':
+          description: Chưa cấu hình InfluxDB settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          description: Lỗi khi query InfluxDB.
+
+  # ==================== SETTINGS — SYSTEM ====================
+
+  /settings/general:
+    get:
+      tags: [Settings - System]
+      summary: Cài đặt chung của hệ thống (public)
+      responses:
+        '200':
+          description: Cài đặt chung.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneralSettings'
+
+    put:
+      tags: [Settings - System]
+      summary: Cập nhật cài đặt chung (admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GeneralSettingsInput'
+      responses:
+        '200':
+          description: Đã cập nhật.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GeneralSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /settings/thresholds:
+    get:
+      tags: [Settings - System]
+      summary: Ngưỡng cảnh báo (public)
+      responses:
+        '200':
+          description: Ngưỡng cảnh báo hiện tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThresholdSettings'
+
+    put:
+      tags: [Settings - System]
+      summary: Cập nhật ngưỡng cảnh báo (admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ThresholdSettingsInput'
+      responses:
+        '200':
+          description: Đã cập nhật.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ThresholdSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /settings/email:
+    get:
+      tags: [Settings - System]
+      summary: Cài đặt SMTP email (admin)
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Cấu hình SMTP (password luôn trả về `••••••••`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+    put:
+      tags: [Settings - System]
+      summary: Cập nhật cài đặt SMTP (admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailSettingsInput'
+      responses:
+        '200':
+          description: Đã cập nhật.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EmailSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /settings/email/test:
+    post:
+      tags: [Settings - System]
+      summary: Gửi email test (admin)
+      security:
+        - bearerAuth: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                  format: email
+      responses:
+        '200':
+          description: Email đã gửi.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ==================== SETTINGS — USER ====================
+
+  /settings/notifications:
+    get:
+      tags: [Settings - User]
+      summary: Cài đặt thông báo của bản thân
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Cài đặt thông báo.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    put:
+      tags: [Settings - User]
+      summary: Cập nhật cài đặt thông báo
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NotificationSettingsInput'
+      responses:
+        '200':
+          description: Đã cập nhật.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/NotificationSettings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  # ==================== WEBSOCKET ====================
+
+  /ws/realtime:
+    get:
+      tags: [WebSocket]
+      summary: Kết nối WebSocket nhận dữ liệu realtime
+      description: |-
+        Nâng cấp HTTP connection lên WebSocket.
+        JWT token truyền qua **query parameter** `token` (không dùng header).
+
+        **URL kết nối:**
+        ```
+        ws://localhost:8088/v1/ws/realtime?token=<accessToken>
+        ```
+
+        ## Lấy sensorId để subscribe
+
+        Gọi `GET /sensors` → lấy `sensorId` (UUID) từ response.
+        **Không dùng `deviceId`** — WebSocket subscribe dùng UUID, không phải InfluxDB tag.
+
+        ```
+        GET /v1/sensors
+        → [{ "sensorId": "a3f2b1c4-...", "deviceId": "esp32_sensor_001", ... }]
+        ```
+
+        ## Message từ Client → Server
+
+        **Subscribe 1 sensor (dùng sensorId UUID):**
+        ```json
+        {"type": "subscribe", "sensorId": "a3f2b1c4-e89b-12d3-a456-426614174000"}
+        ```
+
+        **Subscribe nhiều sensors:**
+        ```json
+        {
+          "type": "subscribe",
+          "sensorIds": [
+            "a3f2b1c4-e89b-12d3-a456-426614174000",
+            "b7c3d2e1-f90c-23e4-b567-537725285111"
+          ]
+        }
+        ```
+
+        **Unsubscribe:**
+        ```json
+        {"type": "unsubscribe", "sensorId": "a3f2b1c4-e89b-12d3-a456-426614174000"}
+        ```
+
+        **Ping:**
+        ```json
+        {"type": "ping"}
+        ```
+
+        ## Message từ Server → Client
+
+        **Xác nhận subscribe:**
+        ```json
+        {"type": "subscribed", "sensorId": "a3f2b1c4-e89b-12d3-a456-426614174000"}
+        ```
+
+        **Dữ liệu realtime (push mỗi ≤ 30s):**
+        ```json
+        {
+          "type": "data",
+          "sensorId": "a3f2b1c4-e89b-12d3-a456-426614174000",
+          "data": {
+            "dataPointId": "esp32_sensor_001_1710000000000",
+            "sensorId": "esp32_sensor_001",
+            "location": "living_room",
+            "timestamp": "2024-03-10T08:30:00Z",
+            "values": {
+              "pm1": 8,
+              "pm25": 24,
+              "pm10": 35,
+              "temperature": 28.5,
+              "humidity": 72.0,
+              "heatIndex": 31.2,
+              "comfort": "Comfortable",
+              "aqiStatus": "Good"
+            }
+          }
+        }
+        ```
+
+        > **Lưu ý:** `sensorId` trong WebSocket message envelope là UUID (dùng để route đến đúng client).
+        > `data.sensorId` bên trong là `sensor_node` tag từ InfluxDB (device_id string) — dùng để hiển thị.
+
+        **Pong:**
+        ```json
+        {"type": "pong"}
+        ```
+
+        ## Keepalive
+        Server tự động gửi WebSocket ping frame mỗi **54 giây**.
+        Timeout sau **60 giây** không có activity.
+
+        ## Luồng đầy đủ
+
+        ```
+        1. GET /v1/sensors → lấy sensorId (UUID) và deviceId của từng sensor
+        2. Connect ws://host/v1/ws/realtime?token=<jwt>
+        3. Send: {"type":"subscribe","sensorId":"<UUID>"}
+        4. Nhận: {"type":"subscribed","sensorId":"<UUID>"}
+        5. Mỗi ≤30s nhận: {"type":"data","sensorId":"<UUID>","data":{...}}
+        ```
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: token
+          in: query
+          required: true
+          description: JWT access token (thay cho Authorization header).
+          schema:
+            type: string
+      responses:
+        '101':
+          description: Switching Protocols — kết nối WebSocket thành công.
+        '401':
+          description: Token thiếu hoặc không hợp lệ.
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    AlertId:
+      name: alertId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Dữ liệu đầu vào không hợp lệ.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Unauthorized:
+      description: Token thiếu hoặc không hợp lệ.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    Forbidden:
+      description: Không đủ quyền thực hiện.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+    NotFound:
+      description: Không tìm thấy tài nguyên.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+  schemas:
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            code:
+              type: string
+              example: VALIDATION_ERROR
+            message:
+              type: string
+              example: Missing required parameter
+
+    RegisterRequest:
+      type: object
+      required: [email, password, timezone]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        timezone:
+          type: string
+          example: Asia/Ho_Chi_Minh
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+
+    TokenResponse:
+      type: object
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        tokenType:
+          type: string
+          example: Bearer
+        expiresIn:
+          type: integer
+          example: 3600
+
+    User:
+      type: object
+      properties:
+        userId:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        name:
+          type: string
+        phone:
+          type: string
+        role:
+          type: string
+          enum: [admin, manager, user]
+        timezone:
+          type: string
+          example: Asia/Ho_Chi_Minh
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    UserSession:
+      type: object
+      properties:
+        sessionId:
+          type: string
+          format: uuid
+        deviceInfo:
+          type: string
+        ipAddress:
+          type: string
+        lastActivity:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+
+    Sensor:
+      type: object
+      properties:
+        sensorId:
+          type: string
+          format: uuid
+          description: UUID nội bộ trong PostgreSQL. Dùng để **subscribe WebSocket**.
+        name:
+          type: string
+          example: Cảm biến phòng khách
+        deviceId:
+          type: string
+          description: |-
+            Tag `sensor_node` trong InfluxDB.
+            Dùng để query `/data/latest` và `/data/historical`.
+            **Không dùng để subscribe WebSocket** — dùng `sensorId` (UUID) thay thế.
+          example: esp32_sensor_001
+        topicPath:
+          type: string
+          description: "MQTT topic đầy đủ. Pattern: {customerId}/{sensorName}/all"
+          example: customer_a/sensor_001/all
+        customerId:
+          type: string
+          example: customer_a
+        location:
+          type: object
+          properties:
+            latitude:
+              type: number
+              format: float
+              example: 21.0285
+            longitude:
+              type: number
+              format: float
+              example: 105.8542
+        ownerId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [iot, external_station]
+        status:
+          type: string
+          enum: [active, inactive, maintenance]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    SensorInput:
+      type: object
+      required: [name, deviceId, topicPath, customerId, location, type]
+      properties:
+        name:
+          type: string
+        deviceId:
+          type: string
+          description: Phải khớp với tag `sensor_node` trong InfluxDB (thường lowercase).
+          example: esp32_sensor_001
+        topicPath:
+          type: string
+          description: "MQTT topic đầy đủ. Pattern: {customerId}/{sensorName}/all"
+        customerId:
+          type: string
+        location:
+          type: object
+          required: [latitude, longitude]
+          properties:
+            latitude:
+              type: number
+              format: float
+            longitude:
+              type: number
+              format: float
+        type:
+          type: string
+          enum: [iot, external_station]
+
+    DataPoint:
+      type: object
+      description: Một điểm đo từ cảm biến, lấy từ InfluxDB Cloud.
+      properties:
+        dataPointId:
+          type: string
+          description: "Tổng hợp: `{deviceId}_{timestamp_ms}`."
+          example: esp32_sensor_001_1710000000000
+        sensorId:
+          type: string
+          description: Giá trị tag `sensor_node` trong InfluxDB (= deviceId).
+          example: esp32_sensor_001
+        location:
+          type: string
+          description: Giá trị tag `location` trong InfluxDB.
+          example: living_room
+        timestamp:
+          type: string
+          format: date-time
+        values:
+          type: object
+          properties:
+            pm1:
+              type: number
+              example: 8
+            pm25:
+              type: number
+              example: 24
+            pm10:
+              type: number
+              example: 35
+            temperature:
+              type: number
+              example: 28.5
+            humidity:
+              type: number
+              example: 72.0
+            heatIndex:
+              type: number
+              example: 31.2
+            comfort:
+              type: string
+              example: Comfortable
+            aqiStatus:
+              type: string
+              example: Good
+
+    Alert:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        sensorId:
+          type: string
+          format: uuid
+          description: UUID sensor trong PostgreSQL.
+        alert_type:
+          type: string
+          enum: [high_pm25, high_pm10, high_aqi]
+        message:
+          type: string
+        is_active:
+          type: boolean
+        severity:
+          type: string
+          enum: [warning, danger]
+        value:
+          type: number
+          format: float
+        threshold:
+          type: number
+          format: float
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    AlertCheckResult:
+      type: object
+      properties:
+        alertCreated:
+          type: boolean
+        alert:
+          allOf:
+            - $ref: '#/components/schemas/Alert'
+          nullable: true
+        message:
+          type: string
+
+    AlertStatistics:
+      type: object
+      properties:
+        totalAlerts:
+          type: integer
+        activeAlerts:
+          type: integer
+        inactiveAlerts:
+          type: integer
+        alertsByType:
+          type: object
+          properties:
+            high_pm25:
+              type: integer
+            high_pm10:
+              type: integer
+            high_aqi:
+              type: integer
+
+    InfluxSettings:
+      type: object
+      properties:
+        settingId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        influxUrl:
+          type: string
+        influxToken:
+          type: string
+          description: Bị mask khi GET.
+        influxOrg:
+          type: string
+        influxBucket:
+          type: string
+        measurement:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    InfluxSettingsInput:
+      type: object
+      required: [influxUrl, influxToken, influxOrg, influxBucket, measurement]
+      properties:
+        influxUrl:
+          type: string
+        influxToken:
+          type: string
+        influxOrg:
+          type: string
+        influxBucket:
+          type: string
+        measurement:
+          type: string
+
+    InfluxDevice:
+      type: object
+      properties:
+        deviceId:
+          type: string
+          description: Giá trị tag `sensor_node` trong InfluxDB. Dùng cho `POST /sensors`.
+          example: esp32_sensor_001
+        location:
+          type: string
+          example: living_room
+
+    InfluxDiscoverResponse:
+      type: object
+      properties:
+        devices:
+          type: array
+          items:
+            $ref: '#/components/schemas/InfluxDevice'
+        bucket:
+          type: string
+        measurement:
+          type: string
+        total:
+          type: integer
+
+    GeneralSettings:
+      type: object
+      properties:
+        settingId:
+          type: string
+          format: uuid
+        siteName:
+          type: string
+        defaultTimezone:
+          type: string
+        defaultLanguage:
+          type: string
+        dateFormat:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    GeneralSettingsInput:
+      type: object
+      properties:
+        siteName:
+          type: string
+        defaultTimezone:
+          type: string
+        defaultLanguage:
+          type: string
+        dateFormat:
+          type: string
+
+    ThresholdSettings:
+      type: object
+      properties:
+        settingId:
+          type: string
+          format: uuid
+        pm25Warning:
+          type: integer
+          example: 35
+        pm25Danger:
+          type: integer
+          example: 55
+        pm10Warning:
+          type: integer
+          example: 50
+        pm10Danger:
+          type: integer
+          example: 100
+        aqiWarning:
+          type: integer
+          example: 100
+        aqiDanger:
+          type: integer
+          example: 150
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ThresholdSettingsInput:
+      type: object
+      properties:
+        pm25Warning:
+          type: integer
+        pm25Danger:
+          type: integer
+        pm10Warning:
+          type: integer
+        pm10Danger:
+          type: integer
+        aqiWarning:
+          type: integer
+        aqiDanger:
+          type: integer
+
+    NotificationSettings:
+      type: object
+      properties:
+        settingId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        emailAlerts:
+          type: boolean
+        smsAlerts:
+          type: boolean
+        pushNotifications:
+          type: boolean
+        alertThreshold:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    NotificationSettingsInput:
+      type: object
+      properties:
+        emailAlerts:
+          type: boolean
+        smsAlerts:
+          type: boolean
+        pushNotifications:
+          type: boolean
+        alertThreshold:
+          type: integer
+
+    EmailSettings:
+      type: object
+      properties:
+        settingId:
+          type: string
+          format: uuid
+        smtpHost:
+          type: string
+        smtpPort:
+          type: integer
+        smtpUser:
+          type: string
+        smtpPassword:
+          type: string
+          description: Luôn trả về "••••••••"
+        fromEmail:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    EmailSettingsInput:
+      type: object
+      required: [smtpHost, smtpPort, smtpUser, smtpPassword, fromEmail]
+      properties:
+        smtpHost:
+          type: string
+        smtpPort:
+          type: integer
+        smtpUser:
+          type: string
+        smtpPassword:
+          type: string
+        fromEmail:
+          type: string
+          format: email

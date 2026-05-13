@@ -1,0 +1,564 @@
+openapi: 3.0.3
+
+info:
+  title: Air Quality Backend ML API
+  version: "1.2.0"
+  description: |
+    Frontend-facing ML forecast and monitoring contract exposed by the Go backend.
+
+    **Multi-target prediction (v1.2+):**
+    The ML backend now supports predicting ALL PM indices (pm1_0, pm2_5, pm10) plus AQI
+    in a single forecast call instead of one target at a time. The `target_columns`
+    field in the response lists which features are included in each forecast point.
+
+    The frontend calls these `/v1/forecast/*` endpoints with a JWT bearer token.
+    The backend validates the request, optionally reads historical sensor data
+    from InfluxDB, converts it to the ML service `points[]` payload, then calls
+    the internal ML service endpoint `POST /forecast/{model_key}`.
+
+    Drift tracking endpoints are exposed under `/v1/monitoring/drift/*`.
+    The backend validates the model key and proxies read-only monitoring
+    responses from the internal ML service.
+
+servers:
+  - url: http://localhost:8080
+    description: Local Go backend
+
+tags:
+  - name: Forecast
+    description: ML forecast endpoints used by the frontend.
+  - name: Monitoring
+    description: ML drift monitoring endpoints used by the frontend.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/forecast/{modelKey}:
+    get:
+      tags: [Forecast]
+      operationId: forecastFromSensorHistory
+      summary: Forecast from stored sensor history
+      description: |
+        Fetches historical points for one sensor from InfluxDB and forwards them
+        to the ML service. Use this endpoint when the frontend only knows the
+        sensor ID and wants the backend to prepare the ML input.
+
+        Defaults:
+        - `endTime`: current backend time
+        - `historyHours`: 24
+        - `limit`: 1000
+
+        Backward-compatible aliases accepted for `sensorNode`:
+        - `deviceId`
+        - first value from comma-separated `sensorIds`
+      parameters:
+        - $ref: "#/components/parameters/ModelKey"
+        - name: sensorNode
+          in: query
+          required: true
+          description: InfluxDB `sensor_node` tag for the sensor.
+          schema:
+            type: string
+          example: esp32_sensor_001
+        - name: startTime
+          in: query
+          required: false
+          description: Optional RFC3339 start time. If omitted, `historyHours` is used.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-05-04T10:00:00Z"
+        - name: endTime
+          in: query
+          required: false
+          description: Optional RFC3339 end time. Defaults to current backend time.
+          schema:
+            type: string
+            format: date-time
+          example: "2026-05-05T10:00:00Z"
+        - name: historyHours
+          in: query
+          required: false
+          description: Lookback window in hours when `startTime` is omitted.
+          schema:
+            type: integer
+            minimum: 1
+            default: 24
+          example: 24
+        - name: limit
+          in: query
+          required: false
+          description: Maximum historical points read from InfluxDB.
+          schema:
+            type: integer
+            minimum: 1
+            default: 1000
+          example: 1000
+      responses:
+        "200":
+          description: Forecast generated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForecastResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InfluxError"
+        "502":
+          $ref: "#/components/responses/MLServiceError"
+        "503":
+          $ref: "#/components/responses/MLServiceError"
+
+    post:
+      tags: [Forecast]
+      operationId: forecastFromProvidedPoints
+      summary: Forecast from frontend-provided points
+      description: |
+        Forwards caller-provided `points[]` to the internal ML service. Use this
+        endpoint when the frontend already has a prepared historical time series
+        and does not need the backend to query InfluxDB.
+      parameters:
+        - $ref: "#/components/parameters/ModelKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForecastRequest"
+            example:
+              points:
+                - timestamp: "2026-05-05T09:55:00Z"
+                  pm1_0: 34.2
+                  pm2_5: 58.1
+                  pm10: 76.8
+                  temperature: 30.4
+                  humidity: 72.5
+                  aqi: 118.4
+                - timestamp: "2026-05-05T10:00:00Z"
+                  pm1_0: 35.1
+                  pm2_5: 59.7
+                  pm10: 78.0
+                  temperature: 30.5
+                  humidity: 72.0
+                  aqi: 120.1
+      responses:
+        "200":
+          description: Forecast generated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForecastResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/MLServiceError"
+        "503":
+          $ref: "#/components/responses/MLServiceError"
+
+  /v1/monitoring/drift/{modelKey}/summary:
+    get:
+      tags: [Monitoring]
+      operationId: getBackendDriftSummary
+      summary: Latest drift summary
+      description: |
+        Proxies the latest input and prediction drift summary for one model from
+        the internal ML service.
+      parameters:
+        - $ref: "#/components/parameters/ModelKey"
+      responses:
+        "200":
+          description: Current drift snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftSummaryResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/MLServiceError"
+        "503":
+          $ref: "#/components/responses/MLServiceError"
+
+  /v1/monitoring/drift/{modelKey}/timeseries:
+    get:
+      tags: [Monitoring]
+      operationId: getBackendDriftTimeseries
+      summary: Drift time series for charts
+      description: |
+        Proxies historical drift points for charting input and prediction drift
+        by feature.
+      parameters:
+        - $ref: "#/components/parameters/ModelKey"
+      responses:
+        "200":
+          description: Historical drift points.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftSeriesResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/MLServiceError"
+        "503":
+          $ref: "#/components/responses/MLServiceError"
+
+  /v1/monitoring/drift/{modelKey}/features/latest:
+    get:
+      tags: [Monitoring]
+      operationId: getBackendLatestFeatureDrift
+      summary: Latest feature-level drift list
+      description: |
+        Proxies the latest feature-level drift statuses for one model.
+      parameters:
+        - $ref: "#/components/parameters/ModelKey"
+      responses:
+        "200":
+          description: Latest feature drift statuses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DriftFeatureStatus"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "502":
+          $ref: "#/components/responses/MLServiceError"
+        "503":
+          $ref: "#/components/responses/MLServiceError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ModelKey:
+      name: modelKey
+      in: path
+      required: true
+      description: Deployed ML model key.
+      schema:
+        $ref: "#/components/schemas/ModelKey"
+
+  responses:
+    ValidationError:
+      description: Invalid model key, query parameter, or request body.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: VALIDATION_ERROR
+              message: "Invalid modelKey. Allowed: lstm, gru, bilstm, informer, arima"
+    Unauthorized:
+      description: Missing, invalid, or expired bearer token.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: UNAUTHORIZED
+              message: Invalid or expired token
+    NotFound:
+      description: No historical data found for the requested sensor.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: NOT_FOUND
+              message: No historical data found for this sensor
+    InfluxError:
+      description: Backend failed to query InfluxDB.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: INFLUX_ERROR
+              message: Failed to query InfluxDB
+    MLServiceError:
+      description: Internal ML service is unavailable or returned an error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: ML_SERVICE_ERROR
+              message: "ml service returned 503: {\"detail\":\"model artifact missing\"}"
+
+  schemas:
+    ModelKey:
+      type: string
+      enum: [lstm, gru, bilstm, informer, arima]
+      example: lstm
+
+    ForecastRequest:
+      type: object
+      required: [points]
+      properties:
+        points:
+          type: array
+          minItems: 1
+          items:
+            $ref: "#/components/schemas/ObservationPoint"
+
+    ObservationPoint:
+      type: object
+      required: [timestamp]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:00:00Z"
+        aqi:
+          type: number
+          nullable: true
+          example: 118.4
+        pm1_0:
+          type: number
+          nullable: true
+          example: 34.2
+        pm2_5:
+          type: number
+          nullable: true
+          example: 58.1
+        pm10:
+          type: number
+          nullable: true
+          example: 76.8
+        temperature:
+          type: number
+          nullable: true
+          example: 30.4
+        humidity:
+          type: number
+          nullable: true
+          example: 72.5
+
+    ForecastPoint:
+      type: object
+      required: [timestamp]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:05:00Z"
+        aqi:
+          type: number
+          nullable: true
+          example: 137.08
+        pm1_0:
+          type: number
+          nullable: true
+          example: 36.0
+        pm2_5:
+          type: number
+          nullable: true
+          example: 61.2
+        pm10:
+          type: number
+          nullable: true
+          example: 81.4
+        temperature:
+          type: number
+          nullable: true
+          example: 30.6
+        humidity:
+          type: number
+          nullable: true
+          example: 71.8
+
+    AlertPoint:
+      type: object
+      required: [timestamp, value]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:10:00Z"
+        value:
+          type: number
+          example: 103.2
+
+    ForecastResponse:
+      type: object
+      required: [model, target_columns, horizon, resample_freq, forecast, alerts]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        target_columns:
+          type: array
+          items:
+            type: string
+          description: List of target features predicted by the model.
+          example: [pm1_0, pm2_5, pm10, aqi]
+        horizon:
+          type: integer
+          example: 12
+        resample_freq:
+          type: string
+          example: 5min
+        forecast:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForecastPoint"
+        alerts:
+          type: object
+          description: Threshold exceedance points grouped by feature name.
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/AlertPoint"
+          example:
+            aqi:
+              - timestamp: "2026-05-05T10:10:00Z"
+                value: 103.2
+            pm2_5:
+              - timestamp: "2026-05-05T10:15:00Z"
+                value: 75.5
+
+    DriftStatus:
+      type: string
+      enum: [stable, warning, drift, insufficient_data, not_available]
+      example: warning
+
+    DriftFeatureStatus:
+      type: object
+      required: [feature, status, sample_size]
+      properties:
+        feature:
+          type: string
+          example: pm2_5
+        psi:
+          type: number
+          nullable: true
+          example: 0.17
+        status:
+          $ref: "#/components/schemas/DriftStatus"
+        sample_size:
+          type: integer
+          example: 200
+        mean:
+          type: number
+          nullable: true
+          example: 58.4
+        std:
+          type: number
+          nullable: true
+          example: 12.6
+        min:
+          type: number
+          nullable: true
+          example: 24.1
+        max:
+          type: number
+          nullable: true
+          example: 96.7
+
+    DriftSummaryResponse:
+      type: object
+      required: [model, generated_at, overall_status, events_in_window, history_points, input_drift, prediction_drift]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        generated_at:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:00:00Z"
+        overall_status:
+          $ref: "#/components/schemas/DriftStatus"
+        events_in_window:
+          type: integer
+          example: 4
+        history_points:
+          type: integer
+          example: 288
+        input_drift:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftFeatureStatus"
+        prediction_drift:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftFeatureStatus"
+
+    DriftSeriesPoint:
+      type: object
+      required: [timestamp, scope, feature, status, sample_size]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:00:00Z"
+        scope:
+          type: string
+          enum: [input, prediction]
+          example: input
+        feature:
+          type: string
+          example: pm2_5
+        psi:
+          type: number
+          nullable: true
+          example: 0.17
+        status:
+          type: string
+          enum: [stable, warning, drift, insufficient_data]
+          example: warning
+        sample_size:
+          type: integer
+          example: 200
+
+    DriftSeriesResponse:
+      type: object
+      required: [model, generated_at, series]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        generated_at:
+          type: string
+          format: date-time
+          example: "2026-05-05T10:00:00Z"
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftSeriesPoint"
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: ML_SERVICE_ERROR
+            message:
+              type: string
+              example: ml service unavailable
