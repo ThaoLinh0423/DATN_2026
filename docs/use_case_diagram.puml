@@ -1,0 +1,126 @@
+@startuml Use Case Diagram - Air Quality System
+
+skinparam backgroundColor #FFFFFF
+skinparam actorStyle hollow
+skinparam packageStyle rectangle
+
+' ============================================
+' ACTORS
+' ============================================
+
+actor "Người dùng" as User
+actor "Quản lý" as Manager
+actor "Quản trị viên" as Admin
+actor "Hệ thống" as System
+
+' ============================================
+' PACKAGES
+' ============================================
+
+package "Xác thực" {
+  usecase "Đăng ký tài khoản" as UC1
+  usecase "Đăng nhập" as UC2
+  usecase "Đăng xuất" as UC3
+}
+
+package "Quản lý người dùng" {
+  usecase "Xem thông tin cá nhân" as UC6
+  usecase "Cập nhật thông tin cá nhân" as UC8
+  usecase "Quản lý người dùng" as UC44
+}
+
+package "Quản lý cảm biến" {
+  usecase "Xem danh sách cảm biến" as UC9
+  usecase "Thêm cảm biến mới" as UC10
+  usecase "Xóa cảm biến" as UC11
+  usecase "Cấp quyền truy cập" as UC13
+  usecase "Thu hồi quyền truy cập" as UC14
+}
+
+package "Truy vấn dữ liệu & Realtime" {
+  usecase "Truy vấn dữ liệu realtime" as UC15
+  usecase "Truy vấn dữ liệu lịch sử" as UC16
+  usecase "Kết nối WebSocket" as UC17
+}
+
+package "Dự báo ML" {
+  usecase "Dự báo chất lượng không khí" as UC18
+  usecase "Theo dõi drift" as UC20
+}
+
+package "Quản lý cảnh báo" {
+  usecase "Xem danh sách cảnh báo" as UC23
+  usecase "Cập nhật trạng thái cảnh báo" as UC25
+  usecase "Tạo cảnh báo thủ công" as UC29
+  usecase "Kiểm tra ngưỡng tự động" as UC30
+}
+
+package "Cài đặt hệ thống" {
+  usecase "Cài đặt chung" as UC31
+  usecase "Cài đặt ngưỡng cảnh báo" as UC34
+  usecase "Cài đặt InfluxDB" as UC39
+  usecase "Cài đặt thông báo" as UC43
+}
+
+package "Bảng quản trị" {
+  usecase "Xem danh sách người dùng" as UC44_ADMIN
+  usecase "Cập nhật vai trò" as UC46_ADMIN
+}
+
+' ============================================
+' ACTOR RELATIONSHIPS
+' ============================================
+
+' Xác thực
+User --> UC1
+User --> UC2
+User --> UC3
+
+' Quản lý người dùng
+User --> UC6
+User --> UC8
+Admin --> UC44
+
+' Quản lý cảm biến
+User --> UC9
+Manager --> UC10
+Admin --> UC10
+Manager --> UC11
+Admin --> UC11
+Manager --> UC13
+Admin --> UC14
+
+' Truy vấn dữ liệu & Realtime
+User --> UC15
+User --> UC16
+User --> UC17
+
+' Dự báo ML
+User --> UC18
+User --> UC20
+
+' Quản lý cảnh báo
+User --> UC23
+User --> UC25
+Manager --> UC29
+Admin --> UC29
+System --> UC30
+
+' Cài đặt hệ thống
+Admin --> UC31
+Manager --> UC34
+Admin --> UC34
+Admin --> UC39
+User --> UC43
+
+' Bảng quản trị
+Admin --> UC44_ADMIN
+Admin --> UC46_ADMIN
+
+' ============================================
+' INCLUDES / EXTENDS
+' ============================================
+
+UC23 <.. UC25 : <<extends>>
+
+@enduml

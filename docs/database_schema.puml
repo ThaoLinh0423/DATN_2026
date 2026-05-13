@@ -1,0 +1,179 @@
+@startuml PostgreSQL Schema - Air Quality System
+
+!theme plain
+
+' ============================================
+' ENTITY DEFINITIONS
+' ============================================
+
+entity "users" as users {
+  * user_id : UUID <<PK>>
+  --
+  * email : VARCHAR(255) <<UNIQUE>>
+  * password_hash : VARCHAR(255)
+  * name : VARCHAR(100)
+  * phone : VARCHAR(20)
+  * role : VARCHAR(20) <<DEFAULT 'user'>>
+  * timezone : VARCHAR(50) <<DEFAULT 'Asia/Ho_Chi_Minh'>>
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "user_sessions" as sessions {
+  * session_id : UUID <<PK>>
+  --
+  * user_id : UUID <<FK>>
+  * device_info : VARCHAR(255)
+  * ip_address : VARCHAR(45)
+  * last_activity : TIMESTAMP
+  * expires_at : TIMESTAMP
+  * created_at : TIMESTAMP
+}
+
+entity "sensors" as sensors {
+  * sensor_id : UUID <<PK>>
+  --
+  * name : VARCHAR(100)
+  * device_id : VARCHAR(100) <<UNIQUE>>
+  * topic_path : VARCHAR(255)
+  * customer_id : VARCHAR(100)
+  * location_lat : DECIMAL(10,8)
+  * location_lng : DECIMAL(11,8)
+  * owner_id : UUID <<FK>>
+  * type : VARCHAR(50)
+  * status : VARCHAR(20) <<DEFAULT 'active'>>
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "sensor_access" as sensor_access {
+  * id : UUID <<PK>>
+  --
+  * sensor_id : UUID <<FK>>
+  * user_id : UUID <<FK>>
+  * granted_at : TIMESTAMP
+  <<UNIQUE(sensor_id, user_id)>>
+}
+
+entity "alerts" as alerts {
+  * id : UUID <<PK>>
+  --
+  * sensor_id : UUID <<FK>>
+  * alert_type : VARCHAR(50)
+  * message : TEXT
+  * is_active : BOOLEAN <<DEFAULT true>>
+  * severity : VARCHAR(20)
+  * value : DECIMAL(10,2)
+  * threshold : DECIMAL(10,2)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "general_settings" as gen_settings {
+  * setting_id : UUID <<PK>>
+  --
+  * site_name : VARCHAR(100)
+  * default_timezone : VARCHAR(50)
+  * default_language : VARCHAR(20)
+  * date_format : VARCHAR(20)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "threshold_settings" as threshold_settings {
+  * setting_id : UUID <<PK>>
+  --
+  * pm25_warning : DECIMAL(10,2)
+  * pm25_danger : DECIMAL(10,2)
+  * pm10_warning : DECIMAL(10,2)
+  * pm10_danger : DECIMAL(10,2)
+  * aqi_warning : DECIMAL(10,2)
+  * aqi_danger : DECIMAL(10,2)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "email_settings" as email_settings {
+  * setting_id : UUID <<PK>>
+  --
+  * smtp_host : VARCHAR(255)
+  * smtp_port : INTEGER
+  * smtp_user : VARCHAR(255)
+  * smtp_password : VARCHAR(255)
+  * from_email : VARCHAR(255)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "influx_settings" as influx_settings {
+  * setting_id : UUID <<PK>>
+  --
+  * user_id : UUID <<FK>>
+  * influx_url : VARCHAR(500)
+  * influx_token : VARCHAR(500)
+  * influx_org : VARCHAR(100)
+  * influx_bucket : VARCHAR(100)
+  * measurement : VARCHAR(100)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+entity "notification_settings" as notif_settings {
+  * setting_id : UUID <<PK>>
+  --
+  * user_id : UUID <<FK>>
+  * email_alerts : BOOLEAN
+  * sms_alerts : BOOLEAN
+  * push_notifications : BOOLEAN
+  * alert_threshold : DECIMAL(10,2)
+  * created_at : TIMESTAMP
+  * updated_at : TIMESTAMP
+}
+
+' ============================================
+' RELATIONSHIPS
+' ============================================
+
+users ||--o{ sessions : "1:N"
+users ||--o{ sensors : "1:N"
+users ||--o{ sensor_access : "1:N"
+users ||--o{ influx_settings : "1:N"
+users ||--o{ notif_settings : "1:N"
+
+sensors ||--o{ sensor_access : "1:N"
+sensors ||--o{ alerts : "1:N"
+
+' ============================================
+' NOTES
+' ============================================
+
+note top of users
+  <b>Roles:</b> admin, manager, user
+  <b>Auth:</b> JWT + bcrypt
+end note
+
+note top of sensors
+  <b>Two ID types:</b>
+  - sensor_id (UUID, PostgreSQL)
+  - device_id (string, InfluxDB tag)
+end note
+
+note top of sensor_access
+  <b>Purpose:</b> Grant user access to sensors
+  <b>Constraint:</b> Unique(sensor_id, user_id)
+end note
+
+note top of alerts
+  <b>Alert Types:</b> pm25_exceeded, pm10_exceeded, aqi_danger, etc.
+  <b>Severity:</b> warning, danger
+end note
+
+note top of influx_settings
+  <b>Token masking:</b> Only first/last 4 chars shown in responses
+end note
+
+note top of notif_settings
+  <b>Per-user notification preferences</b>
+end note
+
+@enduml

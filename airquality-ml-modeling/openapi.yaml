@@ -1,0 +1,613 @@
+openapi: 3.1.0
+
+info:
+  title: Air Quality Forecast API
+  version: "2.2.0"
+  summary: ML inference API for deployed air-quality forecasting models.
+  description: |
+    OpenAPI contract for the deployed ML endpoints exposed by `deploy.py`.
+
+    Supported deployed models:
+    - `lstm`
+    - `gru`
+    - `bilstm`
+    - `informer`
+    - `arima`
+
+    Typical integration flow:
+    1. Call `GET /health` to verify the service is alive.
+    2. Call `GET /models` to discover enabled models and cache state.
+    3. Optionally call `POST /models/{model_key}/load` to warm a model into RAM.
+    4. Call `POST /forecast/{model_key}` with backend-supplied time-series points.
+    5. Optionally call cache eviction endpoints after retraining or artifact refresh.
+
+    Deploy-time forecast window control:
+    - `FORECAST_INPUT_POINTS`: how many latest points from the request payload are exposed to the model
+    - `FORECAST_OUTPUT_POINTS`: how many forecast points are returned to the caller
+
+servers:
+  - url: http://localhost:8000
+    description: Local development
+  - url: http://0.0.0.0:8000
+    description: Container runtime
+
+tags:
+  - name: General
+    description: Service status and API metadata.
+  - name: Models
+    description: Model discovery and warm-up.
+  - name: Forecasting
+    description: Deployed ML forecast execution.
+  - name: Monitoring
+    description: Drift monitoring endpoints.
+  - name: Admin
+    description: In-memory model cache operations.
+
+components:
+  schemas:
+    ModelKey:
+      type: string
+      enum: [lstm, gru, bilstm, informer, arima]
+      description: Identifier of a deployed forecasting model.
+      example: lstm
+
+    RootResponse:
+      type: object
+      required: [message, version, docs, enabled_models]
+      properties:
+        message:
+          type: string
+          example: Air Quality Forecast API
+        version:
+          type: string
+          example: "2.2.0"
+        docs:
+          type: string
+          example: /docs
+        enabled_models:
+          type: array
+          items:
+            $ref: "#/components/schemas/ModelKey"
+
+    HealthResponse:
+      type: object
+      required: [status, loaded_models, enabled_models, device]
+      properties:
+        status:
+          type: string
+          example: ok
+        loaded_models:
+          type: array
+          description: Models currently present in the in-process LRU cache.
+          items:
+            type: string
+          example: [lstm, gru]
+        enabled_models:
+          type: array
+          description: Models enabled by deploy configuration.
+          items:
+            type: string
+          example: [lstm, gru, bilstm, informer, arima]
+        device:
+          type: string
+          enum: [cpu, cuda]
+          description: PyTorch execution device visible to the service.
+          example: cpu
+
+    ModelInfoResponse:
+      type: object
+      required: [model_key, enabled, cached]
+      properties:
+        model_key:
+          $ref: "#/components/schemas/ModelKey"
+        enabled:
+          type: boolean
+          description: Whether the model is enabled in deployment configuration.
+          example: true
+        cached:
+          type: boolean
+          description: Whether the model is currently loaded into memory.
+          example: false
+        look_back:
+          type: integer
+          nullable: true
+          description: Historical window length used by the model, available after load.
+          example: 48
+        horizon:
+          type: integer
+          nullable: true
+          description: Number of forecast steps produced by the model, available after load.
+          example: 12
+        input_features:
+          type: array
+          nullable: true
+          description: Model input feature names, available after load.
+          items:
+            type: string
+          example: [pm1_0, pm2_5, pm10, aqi, hour_sin, hour_cos, dow_sin, dow_cos]
+
+    ObservationPoint:
+      type: object
+      required: [timestamp]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-02-26T23:55:00+00:00"
+        aqi:
+          type: number
+          nullable: true
+          example: 118.4
+        pm1_0:
+          type: number
+          nullable: true
+          example: 34.2
+        pm2_5:
+          type: number
+          nullable: true
+          example: 58.1
+        pm10:
+          type: number
+          nullable: true
+          example: 76.8
+        temperature:
+          type: number
+          nullable: true
+        humidity:
+          type: number
+          nullable: true
+
+    ForecastRequest:
+      type: object
+      required: [points]
+      properties:
+        points:
+          type: array
+          description: Historical observations supplied by the caller.
+          items:
+            $ref: "#/components/schemas/ObservationPoint"
+
+    ForecastPoint:
+      type: object
+      required: [timestamp]
+      description: Forecasted values at a single time step.
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-02-27T00:00:00+00:00"
+        aqi:
+          type: number
+          nullable: true
+          example: 137.08
+        pm1_0:
+          type: number
+          nullable: true
+        pm2_5:
+          type: number
+          nullable: true
+        pm10:
+          type: number
+          nullable: true
+        temperature:
+          type: number
+          nullable: true
+        humidity:
+          type: number
+          nullable: true
+
+    AlertPoint:
+      type: object
+      required: [timestamp, value]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-02-27T00:10:00+00:00"
+        value:
+          type: number
+          example: 103.2
+
+    ForecastResponse:
+      type: object
+      required: [model, target_columns, horizon, resample_freq, forecast, alerts]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        target_columns:
+          type: array
+          items:
+            type: string
+          example: [pm1_0, pm2_5, pm10, aqi]
+        horizon:
+          type: integer
+          example: 12
+        resample_freq:
+          type: string
+          example: 5min
+        forecast:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForecastPoint"
+        alerts:
+          type: object
+          description: Threshold exceedance points grouped by feature name.
+          additionalProperties:
+            type: array
+            items:
+              $ref: "#/components/schemas/AlertPoint"
+          example:
+            aqi:
+              - timestamp: "2026-02-27T00:10:00+00:00"
+                value: 103.2
+
+    DriftFeatureStatus:
+      type: object
+      required: [feature, status, sample_size]
+      properties:
+        feature:
+          type: string
+          example: pm2_5
+        psi:
+          type: number
+          nullable: true
+          example: 0.17
+        status:
+          type: string
+          enum: [stable, warning, drift, insufficient_data, not_available]
+          example: warning
+        sample_size:
+          type: integer
+          example: 200
+        mean:
+          type: number
+          nullable: true
+        std:
+          type: number
+          nullable: true
+        min:
+          type: number
+          nullable: true
+        max:
+          type: number
+          nullable: true
+
+    DriftSummaryResponse:
+      type: object
+      required:
+        [model, generated_at, overall_status, events_in_window, history_points, input_drift, prediction_drift]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        generated_at:
+          type: string
+          format: date-time
+        overall_status:
+          type: string
+          enum: [stable, warning, drift, insufficient_data, not_available]
+        events_in_window:
+          type: integer
+        history_points:
+          type: integer
+        input_drift:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftFeatureStatus"
+        prediction_drift:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftFeatureStatus"
+
+    DriftSeriesPoint:
+      type: object
+      required: [timestamp, scope, feature, status, sample_size]
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        scope:
+          type: string
+          enum: [input, prediction]
+        feature:
+          type: string
+        psi:
+          type: number
+          nullable: true
+        status:
+          type: string
+          enum: [stable, warning, drift, insufficient_data]
+        sample_size:
+          type: integer
+
+    DriftSeriesResponse:
+      type: object
+      required: [model, generated_at, series]
+      properties:
+        model:
+          $ref: "#/components/schemas/ModelKey"
+        generated_at:
+          type: string
+          format: date-time
+        series:
+          type: array
+          items:
+            $ref: "#/components/schemas/DriftSeriesPoint"
+
+    DetailResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          type: string
+          example: Model 'lstm' has been loaded into cache.
+
+    ClearCacheResponse:
+      type: object
+      required: [detail, evicted]
+      properties:
+        detail:
+          type: string
+          example: Cache cleared.
+        evicted:
+          type: array
+          items:
+            type: string
+          example: [lstm, gru]
+
+    ErrorResponse:
+      type: object
+      required: [detail]
+      properties:
+        detail:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+
+  responses:
+    ValidationError:
+      description: Invalid path parameter, validation error, or unsupported deploy-time forecast window configuration.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    InternalError:
+      description: Unexpected server-side error.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServiceUnavailable:
+      description: Required model artifact is missing from disk.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotImplemented:
+      description: Loaded model does not implement the requested forecast method.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    NotFound:
+      description: Requested cache entry was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+paths:
+  /:
+    get:
+      tags: [General]
+      operationId: apiRoot
+      summary: Service metadata
+      responses:
+        "200":
+          description: Basic API metadata.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RootResponse"
+
+  /health:
+    get:
+      tags: [General]
+      operationId: getHealth
+      summary: Health check
+      description: Returns service status, enabled models, cache state, and compute device.
+      responses:
+        "200":
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /models:
+    get:
+      tags: [Models]
+      operationId: listModels
+      summary: List deployed models
+      description: Lists every configured model and its current cache metadata.
+      responses:
+        "200":
+          description: Model list.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelInfoResponse"
+
+  /models/{model_key}/load:
+    post:
+      tags: [Models]
+      operationId: preloadModel
+      summary: Warm-load model into RAM
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      responses:
+        "200":
+          description: Model loaded into cache.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /forecast/{model_key}:
+    post:
+      tags: [Forecasting]
+      operationId: forecastWithModel
+      summary: Execute forecast using a deployed model
+      description: |
+        Generates the next forecast window from caller-supplied historical observations.
+
+        Integration note:
+        - The caller must supply a request body with `points[]`.
+        - Each point should contain `timestamp` and the feature values required by the target model.
+        - `FORECAST_INPUT_POINTS` can restrict the source history window from the request payload before inference.
+        - `FORECAST_OUTPUT_POINTS` can truncate the returned forecast window after inference.
+        - For sequence models, `FORECAST_INPUT_POINTS` must still be at least the model `look_back`.
+        - `FORECAST_OUTPUT_POINTS` must not exceed the trained model horizon.
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForecastRequest"
+      responses:
+        "200":
+          description: Forecast generated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForecastResponse"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+        "500":
+          $ref: "#/components/responses/InternalError"
+        "501":
+          $ref: "#/components/responses/NotImplemented"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+
+  /monitoring/drift/{model_key}/summary:
+    get:
+      tags: [Monitoring]
+      operationId: getDriftSummary
+      summary: Latest drift summary
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      responses:
+        "200":
+          description: Current drift snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftSummaryResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /monitoring/drift/{model_key}/timeseries:
+    get:
+      tags: [Monitoring]
+      operationId: getDriftTimeseries
+      summary: Drift time series for charts
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      responses:
+        "200":
+          description: Historical drift points.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DriftSeriesResponse"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /monitoring/drift/{model_key}/features/latest:
+    get:
+      tags: [Monitoring]
+      operationId: getLatestFeatureDrift
+      summary: Latest feature-level drift list
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      responses:
+        "200":
+          description: Latest feature statuses.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DriftFeatureStatus"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /cache:
+    delete:
+      tags: [Admin]
+      operationId: clearModelCache
+      summary: Evict all loaded models from cache
+      responses:
+        "200":
+          description: Cache cleared successfully.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ClearCacheResponse"
+
+  /cache/{model_key}:
+    delete:
+      tags: [Admin]
+      operationId: evictModel
+      summary: Evict one loaded model from cache
+      parameters:
+        - name: model_key
+          in: path
+          required: true
+          schema:
+            $ref: "#/components/schemas/ModelKey"
+      responses:
+        "200":
+          description: Selected model evicted from cache.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DetailResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "422":
+          $ref: "#/components/responses/ValidationError"

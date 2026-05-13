@@ -1,0 +1,17 @@
+{
+  "wifi": {
+    "ssid": "Anh Hang Xom",
+    "password": "vannhucu"
+  },
+  "mqtt": {
+    "broker": "4061ab01ecb84322bec7b3914b4fc686.s1.eu.hivemq.cloud",
+    "port": 8883,
+    "client_id": "air_quality_sensor_001",
+    "username": "ToQuyThanh",
+    "password": "Tqt@123456"
+  },
+  "sensor": {
+    "location": "Cau Dien",
+    "measurement_interval": 30000
+  }
+}

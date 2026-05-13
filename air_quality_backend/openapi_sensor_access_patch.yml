@@ -1,0 +1,283 @@
+# =============================================================================
+# openapi_sensor_access_patch.yml
+# Patch cho Sensor Delete & Access Management
+#
+# Cách dùng — append vào openapi.yml:
+#   1. Trong `info.description`, cập nhật bảng Phân quyền:
+#      - `admin`   — tất cả quyền + cấu hình hệ thống + quản lý users + xóa sensor
+#      - `manager` — tất cả quyền user + tạo/xóa sensor + quản lý access
+#      - `user`    — đọc dữ liệu (chỉ sensor được cấp quyền), quản lý tài khoản cá nhân
+#
+#   2. Trong `tags:`, thêm:
+#      - name: Sensor Access
+#        description: Phân quyền user nào được theo dõi sensor nào (admin/manager only).
+#
+#   3. Trong `paths:`, thêm phần PATHS bên dưới (sau /sensors POST, trước /data)
+#
+#   4. Trong `components.schemas`, thêm phần SCHEMAS bên dưới (sau SensorInput)
+#
+#   5. Đổi version: 2.2.0 → 2.4.0
+# =============================================================================
+
+
+# ── PATHS ────────────────────────────────────────────────────────────────────
+
+  /sensors/{sensorId}:
+    delete:
+      tags: [Sensors]
+      summary: Xóa sensor
+      description: |-
+        Yêu cầu role `admin` hoặc `manager`.
+
+        Khi xóa thành công:
+        - Sensor bị xóa khỏi PostgreSQL (cascade xóa alerts và access records liên quan)
+        - Sensor bị xóa khỏi **RealtimePoller ngay lập tức** — không còn được poll nữa
+        - Dữ liệu lịch sử trong InfluxDB **không bị xóa** (InfluxDB quản lý riêng)
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SensorId'
+      responses:
+        '200':
+          description: Xóa thành công.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Sensor đã được xóa
+                  sensorId:
+                    type: string
+                    format: uuid
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /sensors/{sensorId}/access:
+    get:
+      tags: [Sensor Access]
+      summary: Danh sách users có quyền xem sensor
+      description: |-
+        Yêu cầu role `admin` hoặc `manager`.
+
+        Trả về danh sách tất cả users đã được cấp quyền xem sensor này.
+        Admin và manager không cần có bản ghi trong bảng này — họ thấy tất cả mặc định.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SensorId'
+      responses:
+        '200':
+          description: Danh sách access.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorAccessListResponse'
+              example:
+                data:
+                  - id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                    sensorId: a3f2b1c4-e89b-12d3-a456-426614174000
+                    userId: b7c3d2e1-f90c-23e4-b567-537725285111
+                    userEmail: user@example.com
+                    grantedBy: c9d8e7f6-a5b4-3c2d-1e0f-fedcba987654
+                    createdAt: "2024-03-10T08:30:00Z"
+                total: 1
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Sensor không tồn tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      tags: [Sensor Access]
+      summary: Cấp quyền xem sensor cho user
+      description: |-
+        Yêu cầu role `admin` hoặc `manager`.
+
+        **Idempotent** — nếu user đã có quyền thì không lỗi, trả về bản ghi hiện tại.
+
+        Sau khi được cấp quyền:
+        - User có thể thấy sensor trong `GET /sensors` (với JWT token)
+        - User có thể subscribe sensor qua WebSocket bằng `sensorId`
+        - User có thể query `/data/latest` và `/data/historical` bằng `deviceId`
+
+        `admin` và `manager` không cần grant — họ thấy tất cả sensor mặc định.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SensorId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GrantAccessRequest'
+            example:
+              userId: b7c3d2e1-f90c-23e4-b567-537725285111
+      responses:
+        '200':
+          description: Cấp quyền thành công (hoặc đã tồn tại).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SensorAccess'
+        '400':
+          description: userId thiếu hoặc user không tồn tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missing_userId:
+                  summary: Thiếu userId
+                  value:
+                    error:
+                      code: VALIDATION_ERROR
+                      message: userId là bắt buộc
+                user_not_found:
+                  summary: User không tồn tại
+                  value:
+                    error:
+                      code: USER_NOT_FOUND
+                      message: user not found
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Sensor không tồn tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /sensors/{sensorId}/access/{userId}:
+    delete:
+      tags: [Sensor Access]
+      summary: Thu hồi quyền xem sensor của user
+      description: |-
+        Yêu cầu role `admin` hoặc `manager`.
+
+        Sau khi thu hồi, user không còn thấy sensor trong `GET /sensors` nữa.
+        Trả về 404 nếu bản ghi access không tồn tại.
+      security:
+        - bearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/SensorId'
+        - name: userId
+          in: path
+          required: true
+          description: UUID của user cần thu hồi quyền.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Thu hồi thành công.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Đã thu hồi quyền truy cập
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: Access record không tồn tại.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                error:
+                  code: NOT_FOUND
+                  message: Quyền truy cập không tồn tại
+
+
+# ── SCHEMAS ──────────────────────────────────────────────────────────────────
+
+    SensorAccess:
+      type: object
+      description: Bản ghi cấp quyền user ↔ sensor.
+      properties:
+        id:
+          type: string
+          format: uuid
+        sensorId:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        userEmail:
+          type: string
+          format: email
+          description: Email của user (join từ bảng users).
+        grantedBy:
+          type: string
+          format: uuid
+          description: userId của admin/manager đã cấp quyền.
+        createdAt:
+          type: string
+          format: date-time
+
+    SensorAccessListResponse:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/SensorAccess'
+        total:
+          type: integer
+          description: Tổng số users có quyền truy cập sensor này.
+          example: 3
+
+    GrantAccessRequest:
+      type: object
+      required: [userId]
+      properties:
+        userId:
+          type: string
+          format: uuid
+          description: UUID của user cần cấp quyền.
+
+
+# ── PARAMETERS — thêm vào components.parameters (cạnh AlertId, UserId) ───────
+
+    SensorId:
+      name: sensorId
+      in: path
+      required: true
+      description: UUID của sensor trong PostgreSQL.
+      schema:
+        type: string
+        format: uuid
+
+
+# ── NOTE — GET /sensors đã được cập nhật ─────────────────────────────────────
+# Cập nhật description của GET /sensors thành:
+#
+#   description: |-
+#     **Hành vi phụ thuộc vào token:**
+#     - Không có token (public)   → trả về tất cả sensor
+#     - role `admin` / `manager`  → trả về tất cả sensor
+#     - role `user`               → chỉ trả về sensor đã được cấp quyền qua
+#                                   `POST /sensors/{sensorId}/access`
+#
+#     `sensorId` (UUID) dùng để subscribe WebSocket.
+#     `deviceId` dùng để query `/data/latest` và `/data/historical`.

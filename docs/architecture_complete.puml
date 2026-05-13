@@ -1,0 +1,134 @@
+@startuml CompleteSystemArchitecture
+!theme plain
+skinparam componentStyle rectangle
+skinparam defaultFontSize 10
+skinparam roundcorner 6
+
+' === HEADER ===
+title HỆ THỐNG GIÁM SÁT CHẤT LƯỢNG KHÔNG KHÍ - KIẾN TRÚC TỔNG THỂ
+
+' === LAYER 1: DEVICES ===
+package "Layer 1: Thiết bị đo" <<device>> #LightBlue {
+  [ESP32 Sensor Node] as ESP32
+  [PMS5003\nPM1.0/PM2.5/PM10] as PMS
+  [DHT22\nTemp/Humidity] as DHT
+  [JSON Payload\n{device_id, pm1, pm25...}] as JSON
+}
+
+ESP32 --> PMS : Serial
+ESP32 --> DHT : Serial
+PMS --> JSON : Format
+DHT --> JSON : Format
+
+' === LAYER 2: TRANSMISSION ===
+package "Layer 2: Truyền dữ liệu" <<transmission>> #LightGreen {
+  [MQTT Broker\nMosquitto:1883] as MQTT
+  [Telegraf\nMQTT Consumer] as TELE
+  [InfluxDB Cloud\nsensor_data] as INFLUX
+}
+
+ESP32 --> MQTT : MQTT
+MQTT --> TELE : Subscribe
+TELE --> INFLUX : Line Protocol
+
+note bottom of INFLUX
+**Tags:** sensor_node, location, host
+**Fields:** pm1, pm25, pm10, temp, humidity, aqi
+end note
+
+' === LAYER 3: BACKEND ===
+package "Layer 3: Backend Go:8088" <<backend>> #LightYellow {
+  [RealtimePoller\n30s interval] as POLLER
+  [WebSocketService] as WS
+  [InfluxService] as INF_SVC
+
+  database "PostgreSQL" as PG {
+    [users]
+    [sensors]
+    [alerts]
+    [settings]
+    [sessions]
+    [sensor_access]
+  }
+
+  [AlertService] as ALERT
+  [MLService] as ML_CLI
+
+  [REST API\n/v1/*] as REST
+}
+
+INFLUX --> INF_SVC : Query API
+INF_SVC --> POLLER : Latest data
+POLLER --> WS : Broadcast
+POLLER --> ALERT : Check threshold
+ALERT --> PG : Save alerts
+INF_SVC --> REST : Query handlers
+ML_CLI --> REST : Forecast handlers
+
+' === LAYER 4: ML ===
+package "Layer 4: ML Python:8000" <<ml>> #LightPink {
+  [FastAPI Server] as FAST
+  [LSTM] as LSTM
+  [GRU] as GRU
+  [BiLSTM] as BILSTM
+  [Informer] as INF
+  [ARIMA] as ARIMA
+
+  [Drift Monitor\nPSI ≥ 5.0/10.0] as DRIFT
+}
+
+ML_CLI ..> FAST : POST /forecast
+FAST --> LSTM : predict
+FAST --> GRU : predict
+FAST --> BILSTM : predict
+FAST --> INF : predict
+FAST --> ARIMA : predict
+
+LSTM ..> DRIFT : monitor
+GRU ..> DRIFT : monitor
+BILSTM ..> DRIFT : monitor
+INF ..> DRIFT : monitor
+
+' === LAYER 5: FRONTEND ===
+package "Layer 5: Frontend React:5173" <<frontend>> #LightCyan {
+  [useWebSocket] as WS_HOOK
+  [useApi\n(React Query)] as API_HOOK
+
+  [Dashboard\nIndex.tsx] as DASH
+
+  [KpiCard x6] as KPI
+  [PMChart] as CHART
+  [AqiGauge] as GAUGE
+  [Heatmap] as HEAT
+  [ForecastTable] as FTABLE
+  [DriftTracking] as DTRACK
+
+  [Pages:\nLocations, Alerts\nSettings, Reports] as PAGES
+}
+
+WS_HOOK --> DASH : realtime
+API_HOOK --> DASH : REST
+DASH --> KPI : display
+DASH --> CHART : display
+DASH --> GAUGE : display
+DASH --> HEAT : display
+DASH --> FTABLE : display
+DASH --> DTRACK : display
+DASH --> PAGES : nav
+
+' === CONNECTIONS ===
+REST -up-> WS_HOOK : WSS :8088
+REST -up-> API_HOOK : HTTPS :8088
+ML_CLI -up-> FAST : HTTP :8000
+
+' === LEGEND ===
+legend bottom right
+  |= Color |= Layer |
+  | <back:#LightBlue>   </back> | Thiết bị đo |
+  | <back:#LightGreen>  </back> | Truyền dữ liệu |
+  | <back:#LightYellow> </back> | Backend Go |
+  | <back:#LightPink>   </back> | ML Service |
+  | <back:#LightCyan>   </back> | Frontend React |
+end legend
+
+@enduml

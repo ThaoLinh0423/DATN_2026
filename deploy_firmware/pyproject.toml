@@ -1,0 +1,11 @@
+[project]
+name = "deploy-firmware"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "esptool>=4.7.0",
+    "pyserial>=3.5",
+    "rich>=13.0.0",
+]
